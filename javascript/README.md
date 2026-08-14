@@ -7,10 +7,10 @@ npm install @qorm/xun
 ```
 
 ```js
+import { readFileSync } from "node:fs";
 import { parse } from "@qorm/xun";
 
-const doc = parse(`
-host: localhost
-port: !n 8080
-`);
+const doc = parse(readFileSync("config.xun", "utf8"));
 ```
+
+`parse` takes the file contents as a UTF-8 string, not a path.

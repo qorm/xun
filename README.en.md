@@ -226,7 +226,7 @@ Implementations must set limits. At least 64 nesting levels and 1MB files are re
 
 ## Parsers
 
-This repository ships four implementations that share [`testdata/`](testdata/). The entry point is `parse(source)`; the root is a dictionary. Special types such as `!d` / `!ip` come back as tagged values; `!xb` / `!b64` are bytes.
+This repository ships four implementations that share [`testdata/`](testdata/). The entry point is `parse(source)`: `source` is the full XUN text (UTF-8), and the root is a dictionary. Special types such as `!d` / `!ip` come back as tagged values; `!xb` / `!b64` are bytes.
 
 | Language | Package | Install |
 |---|---|---|
@@ -235,22 +235,48 @@ This repository ships four implementations that share [`testdata/`](testdata/). 
 | Go | [`github.com/qorm/xun/go`](go/) | `go get github.com/qorm/xun/go` |
 | Rust | [`xun`](rust/) | `xun = { git = "https://github.com/qorm/xun", subdirectory = "rust" }` |
 
+To load a file, read it as UTF-8 and pass the string to the parser:
+
 ```js
+import { readFileSync } from "node:fs";
 import { parse } from "@qorm/xun";
-const doc = parse("host: localhost\nport: !n 8080\n");
+
+const doc = parse(readFileSync("config.xun", "utf8"));
 ```
 
 ```python
+from pathlib import Path
 from xun import parse
-doc = parse("host: localhost\nport: !n 8080\n")
+
+doc = parse(Path("config.xun").read_text(encoding="utf-8"))
 ```
 
 ```go
-doc, err := xun.Parse("host: localhost\nport: !n 8080\n")
+package main
+
+import (
+    "log"
+    "os"
+
+    "github.com/qorm/xun/go"
+)
+
+func main() {
+    b, err := os.ReadFile("config.xun")
+    if err != nil {
+        log.Fatal(err)
+    }
+    doc, err := xun.Parse(string(b))
+    if err != nil {
+        log.Fatal(err)
+    }
+    _ = doc
+}
 ```
 
 ```rust
-let doc = xun::parse("host: localhost\nport: !n 8080\n")?;
+let src = std::fs::read_to_string("config.xun")?;
+let doc = xun::parse(&src)?;
 ```
 
 JavaScript is on npm: [`@qorm/xun`](https://www.npmjs.com/package/@qorm/xun). Python / Go / Rust are not on PyPI / crates.io yet; install from Git.

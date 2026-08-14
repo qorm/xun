@@ -226,7 +226,7 @@ literal: !s $api
 
 ## 解析器
 
-仓库里有四份实现，共用 [`testdata/`](testdata/)。入口都是 `parse(source)`，根节点是字典。`!d` / `!ip` 等特殊类型以带 tag 的值返回；`!xb` / `!b64` 是字节。
+仓库里有四份实现，共用 [`testdata/`](testdata/)。入口都是 `parse(source)`：`source` 是整份 XUN 文本（UTF-8），根节点是字典。`!d` / `!ip` 等特殊类型以带 tag 的值返回；`!xb` / `!b64` 是字节。
 
 | 语言 | 包 | 安装 |
 |---|---|---|
@@ -235,22 +235,48 @@ literal: !s $api
 | Go | [`github.com/qorm/xun/go`](go/) | `go get github.com/qorm/xun/go` |
 | Rust | [`xun`](rust/) | `xun = { git = "https://github.com/qorm/xun", subdirectory = "rust" }` |
 
+从文件加载时，先按 UTF-8 读成字符串再交给解析器：
+
 ```js
+import { readFileSync } from "node:fs";
 import { parse } from "@qorm/xun";
-const doc = parse("host: localhost\nport: !n 8080\n");
+
+const doc = parse(readFileSync("config.xun", "utf8"));
 ```
 
 ```python
+from pathlib import Path
 from xun import parse
-doc = parse("host: localhost\nport: !n 8080\n")
+
+doc = parse(Path("config.xun").read_text(encoding="utf-8"))
 ```
 
 ```go
-doc, err := xun.Parse("host: localhost\nport: !n 8080\n")
+package main
+
+import (
+    "log"
+    "os"
+
+    "github.com/qorm/xun/go"
+)
+
+func main() {
+    b, err := os.ReadFile("config.xun")
+    if err != nil {
+        log.Fatal(err)
+    }
+    doc, err := xun.Parse(string(b))
+    if err != nil {
+        log.Fatal(err)
+    }
+    _ = doc
+}
 ```
 
 ```rust
-let doc = xun::parse("host: localhost\nport: !n 8080\n")?;
+let src = std::fs::read_to_string("config.xun")?;
+let doc = xun::parse(&src)?;
 ```
 
 JavaScript 已发布到 npm：[`@qorm/xun`](https://www.npmjs.com/package/@qorm/xun)。Python / Go / Rust 尚未上 PyPI / crates.io，从 Git 安装即可。
