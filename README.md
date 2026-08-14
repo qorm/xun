@@ -1,5 +1,7 @@
 # XUN
 
+[English](README.en.md) · [中文](README.md)
+
 XUN（读作「讯」）是一种给人写、给机器解析的配置记法：默认不引号，类型用 `!tag` 显式标出，缩进固定每层两空格。全称 **X Unquoted Notation**。
 
 - 文件扩展名：`.xun`
