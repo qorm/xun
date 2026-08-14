@@ -230,7 +230,7 @@ This repository ships four implementations that share [`testdata/`](testdata/). 
 
 | Language | Package | Install |
 |---|---|---|
-| JavaScript | [`@qorm/xun`](javascript/) | `npm install github:qorm/xun#main:javascript` |
+| JavaScript | [`@qorm/xun`](https://www.npmjs.com/package/@qorm/xun) | `npm install @qorm/xun` |
 | Python | [`xun-format`](python/) (`import xun`) | `pip install git+https://github.com/qorm/xun.git#subdirectory=python` |
 | Go | [`github.com/qorm/xun/go`](go/) | `go get github.com/qorm/xun/go` |
 | Rust | [`xun`](rust/) | `xun = { git = "https://github.com/qorm/xun", subdirectory = "rust" }` |
@@ -253,8 +253,8 @@ doc, err := xun.Parse("host: localhost\nport: !n 8080\n")
 let doc = xun::parse("host: localhost\nport: !n 8080\n")?;
 ```
 
-These packages are not published to npm / PyPI / crates.io yet. Install from Git.
+JavaScript is on npm: [`@qorm/xun`](https://www.npmjs.com/package/@qorm/xun). Python / Go / Rust are not on PyPI / crates.io yet; install from Git.
 
 ## Status
 
-The language rules have settled. Parsers exist for JavaScript, Python, Go, and Rust. They are not released to package registries yet.
+The language rules have settled. Parsers exist for JavaScript, Python, Go, and Rust. `@qorm/xun` is published to npm as `0.1.0`.

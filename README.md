@@ -230,7 +230,7 @@ literal: !s $api
 
 | 语言 | 包 | 安装 |
 |---|---|---|
-| JavaScript | [`@qorm/xun`](javascript/) | `npm install github:qorm/xun#main:javascript` |
+| JavaScript | [`@qorm/xun`](https://www.npmjs.com/package/@qorm/xun) | `npm install @qorm/xun` |
 | Python | [`xun-format`](python/)（`import xun`） | `pip install git+https://github.com/qorm/xun.git#subdirectory=python` |
 | Go | [`github.com/qorm/xun/go`](go/) | `go get github.com/qorm/xun/go` |
 | Rust | [`xun`](rust/) | `xun = { git = "https://github.com/qorm/xun", subdirectory = "rust" }` |
@@ -253,8 +253,8 @@ doc, err := xun.Parse("host: localhost\nport: !n 8080\n")
 let doc = xun::parse("host: localhost\nport: !n 8080\n")?;
 ```
 
-尚未发布到 npm / PyPI / crates.io。从 Git 安装即可。
+JavaScript 已发布到 npm：[`@qorm/xun`](https://www.npmjs.com/package/@qorm/xun)。Python / Go / Rust 尚未上 PyPI / crates.io，从 Git 安装即可。
 
 ## 状态
 
-语言规则已收敛。JavaScript、Python、Go、Rust 解析器已实现，尚未发版。
+语言规则已收敛。JavaScript、Python、Go、Rust 解析器已实现。`@qorm/xun` 已发 npm `0.1.0`。
