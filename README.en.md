@@ -226,7 +226,7 @@ Implementations must set limits. At least 64 nesting levels and 1MB files are re
 
 ## Parsers
 
-This repository ships four implementations that share [`testdata/`](testdata/). The entry point is `parse(source)`: `source` is the full XUN text (UTF-8), and the root is a dictionary. Special types such as `!d` / `!ip` come back as tagged values; `!xb` / `!b64` are bytes.
+This repository ships six implementations that share [`testdata/`](testdata/). The entry point is `parse(source)`: `source` is the full XUN text (UTF-8), and the root is a dictionary. Special types such as `!d` / `!ip` come back as tagged values; `!xb` / `!b64` are bytes. C also provides `xun_parse_file`.
 
 | Language | Package | Install |
 |---|---|---|
@@ -234,6 +234,8 @@ This repository ships four implementations that share [`testdata/`](testdata/). 
 | Python | [`xun-format`](python/) (`import xun`) | `pip install git+https://github.com/qorm/xun.git#subdirectory=python` |
 | Go | [`github.com/qorm/xun/go`](go/) | `go get github.com/qorm/xun/go` |
 | Rust | [`xun`](rust/) | `xun = { git = "https://github.com/qorm/xun", subdirectory = "rust" }` |
+| Java | [`io.github.qorm.xun`](java/) | add `java/src` to your source path |
+| C | [`c/`](c/) | compile `xun.h` / `xun.c` into your project |
 
 To load a file, read it as UTF-8 and pass the string to the parser:
 
@@ -279,8 +281,31 @@ let src = std::fs::read_to_string("config.xun")?;
 let doc = xun::parse(&src)?;
 ```
 
-JavaScript is on npm: [`@qorm/xun`](https://www.npmjs.com/package/@qorm/xun). Python / Go / Rust are not on PyPI / crates.io yet; install from Git.
+```java
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.Map;
+import io.github.qorm.xun.Xun;
+
+Map<String, Object> doc = Xun.parse(
+    Files.readString(Path.of("config.xun"), StandardCharsets.UTF_8));
+```
+
+```c
+#include "xun.h"
+
+xun_value *doc = NULL;
+xun_error err;
+if (xun_parse_file("config.xun", &doc, &err) != 0) {
+    fprintf(stderr, "line %d: %s\n", err.line, err.message);
+    return 1;
+}
+xun_free(doc);
+```
+
+JavaScript is on npm: [`@qorm/xun`](https://www.npmjs.com/package/@qorm/xun). The other languages are not on central registries yet; install from Git or compile the sources.
 
 ## Status
 
-The language rules have settled. Parsers exist for JavaScript, Python, Go, and Rust. `@qorm/xun` is published to npm as `0.1.0`.
+The language rules have settled. Parsers exist for JavaScript, Python, Go, Rust, Java, and C. `@qorm/xun` is published to npm as `0.1.0`.

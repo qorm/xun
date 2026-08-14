@@ -226,7 +226,7 @@ literal: !s $api
 
 ## 解析器
 
-仓库里有四份实现，共用 [`testdata/`](testdata/)。入口都是 `parse(source)`：`source` 是整份 XUN 文本（UTF-8），根节点是字典。`!d` / `!ip` 等特殊类型以带 tag 的值返回；`!xb` / `!b64` 是字节。
+仓库里有六份实现，共用 [`testdata/`](testdata/)。入口都是 `parse(source)`：`source` 是整份 XUN 文本（UTF-8），根节点是字典。`!d` / `!ip` 等特殊类型以带 tag 的值返回；`!xb` / `!b64` 是字节。C 另外提供 `xun_parse_file`。
 
 | 语言 | 包 | 安装 |
 |---|---|---|
@@ -234,6 +234,8 @@ literal: !s $api
 | Python | [`xun-format`](python/)（`import xun`） | `pip install git+https://github.com/qorm/xun.git#subdirectory=python` |
 | Go | [`github.com/qorm/xun/go`](go/) | `go get github.com/qorm/xun/go` |
 | Rust | [`xun`](rust/) | `xun = { git = "https://github.com/qorm/xun", subdirectory = "rust" }` |
+| Java | [`io.github.qorm.xun`](java/) | 把 `java/src` 加入源码路径 |
+| C | [`c/`](c/) | 把 `xun.h` / `xun.c` 编进工程 |
 
 从文件加载时，先按 UTF-8 读成字符串再交给解析器：
 
@@ -279,8 +281,31 @@ let src = std::fs::read_to_string("config.xun")?;
 let doc = xun::parse(&src)?;
 ```
 
-JavaScript 已发布到 npm：[`@qorm/xun`](https://www.npmjs.com/package/@qorm/xun)。Python / Go / Rust 尚未上 PyPI / crates.io，从 Git 安装即可。
+```java
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.Map;
+import io.github.qorm.xun.Xun;
+
+Map<String, Object> doc = Xun.parse(
+    Files.readString(Path.of("config.xun"), StandardCharsets.UTF_8));
+```
+
+```c
+#include "xun.h"
+
+xun_value *doc = NULL;
+xun_error err;
+if (xun_parse_file("config.xun", &doc, &err) != 0) {
+    fprintf(stderr, "line %d: %s\n", err.line, err.message);
+    return 1;
+}
+xun_free(doc);
+```
+
+JavaScript 已发布到 npm：[`@qorm/xun`](https://www.npmjs.com/package/@qorm/xun)。其余语言尚未上中央仓库，从 Git 安装或把源码编进工程即可。
 
 ## 状态
 
-语言规则已收敛。JavaScript、Python、Go、Rust 解析器已实现。`@qorm/xun` 已发 npm `0.1.0`。
+语言规则已收敛。JavaScript、Python、Go、Rust、Java、C 解析器已实现。`@qorm/xun` 已发 npm `0.1.0`。
