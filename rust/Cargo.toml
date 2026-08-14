@@ -1,0 +1,10 @@
+[package]
+name = "xun"
+version = "0.1.0"
+edition = "2021"
+description = "XUN (X Unquoted Notation) parser"
+license = "MIT"
+repository = "https://github.com/qorm/xun"
+
+[lib]
+path = "src/lib.rs"

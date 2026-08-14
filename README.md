@@ -224,6 +224,37 @@ literal: !s $api
 
 `!url`、`!email`、`!re`、`!cron` 等走未知 tag，不进核心。
 
+## 解析器
+
+仓库里有四份实现，共用 [`testdata/`](testdata/)。入口都是 `parse(source)`，根节点是字典。`!d` / `!ip` 等特殊类型以带 tag 的值返回；`!xb` / `!b64` 是字节。
+
+| 语言 | 包 | 安装 |
+|---|---|---|
+| JavaScript | [`@qorm/xun`](javascript/) | `npm install github:qorm/xun#main:javascript` |
+| Python | [`xun-format`](python/)（`import xun`） | `pip install git+https://github.com/qorm/xun.git#subdirectory=python` |
+| Go | [`github.com/qorm/xun/go`](go/) | `go get github.com/qorm/xun/go` |
+| Rust | [`xun`](rust/) | `xun = { git = "https://github.com/qorm/xun", subdirectory = "rust" }` |
+
+```js
+import { parse } from "@qorm/xun";
+const doc = parse("host: localhost\nport: !n 8080\n");
+```
+
+```python
+from xun import parse
+doc = parse("host: localhost\nport: !n 8080\n")
+```
+
+```go
+doc, err := xun.Parse("host: localhost\nport: !n 8080\n")
+```
+
+```rust
+let doc = xun::parse("host: localhost\nport: !n 8080\n")?;
+```
+
+尚未发布到 npm / PyPI / crates.io。从 Git 安装即可。
+
 ## 状态
 
-语言规则已收敛，解析器尚未实现。
+语言规则已收敛。JavaScript、Python、Go、Rust 解析器已实现，尚未发版。

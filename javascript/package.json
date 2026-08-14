@@ -1,0 +1,36 @@
+{
+  "type": "module",
+  "name": "@qorm/xun",
+  "version": "0.1.0",
+  "description": "XUN (X Unquoted Notation) parser",
+  "license": "MIT",
+  "keywords": ["xun", "config", "parser", "unquoted"],
+  "homepage": "https://github.com/qorm/xun",
+  "bugs": {
+    "url": "https://github.com/qorm/xun/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/qorm/xun.git",
+    "directory": "javascript"
+  },
+  "main": "./src/xun.js",
+  "types": "./src/xun.d.ts",
+  "exports": {
+    ".": {
+      "types": "./src/xun.d.ts",
+      "import": "./src/xun.js"
+    }
+  },
+  "files": ["src", "LICENSE", "README.md"],
+  "scripts": {
+    "test": "node --test test/*.test.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  }
+}

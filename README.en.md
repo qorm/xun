@@ -224,6 +224,37 @@ Implementations must set limits. At least 64 nesting levels and 1MB files are re
 
 `!url`, `!email`, `!re`, `!cron`, and similar stay unknown tags, not core.
 
+## Parsers
+
+This repository ships four implementations that share [`testdata/`](testdata/). The entry point is `parse(source)`; the root is a dictionary. Special types such as `!d` / `!ip` come back as tagged values; `!xb` / `!b64` are bytes.
+
+| Language | Package | Install |
+|---|---|---|
+| JavaScript | [`@qorm/xun`](javascript/) | `npm install github:qorm/xun#main:javascript` |
+| Python | [`xun-format`](python/) (`import xun`) | `pip install git+https://github.com/qorm/xun.git#subdirectory=python` |
+| Go | [`github.com/qorm/xun/go`](go/) | `go get github.com/qorm/xun/go` |
+| Rust | [`xun`](rust/) | `xun = { git = "https://github.com/qorm/xun", subdirectory = "rust" }` |
+
+```js
+import { parse } from "@qorm/xun";
+const doc = parse("host: localhost\nport: !n 8080\n");
+```
+
+```python
+from xun import parse
+doc = parse("host: localhost\nport: !n 8080\n")
+```
+
+```go
+doc, err := xun.Parse("host: localhost\nport: !n 8080\n")
+```
+
+```rust
+let doc = xun::parse("host: localhost\nport: !n 8080\n")?;
+```
+
+These packages are not published to npm / PyPI / crates.io yet. Install from Git.
+
 ## Status
 
-The language rules have settled. A parser is not implemented yet.
+The language rules have settled. Parsers exist for JavaScript, Python, Go, and Rust. They are not released to package registries yet.
