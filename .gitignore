@@ -2,6 +2,8 @@
 /python/.pytest_cache/
 /java/build/
 /c/xun_test
+/c/*.dSYM/
+*.dSYM/
 **/__pycache__/
 *.pyc
 .DS_Store
