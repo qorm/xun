@@ -14,6 +14,72 @@ Compared with TOML: deep nesting relies naturally on indentation without repeati
 
 ---
 
+## XUN vs JSON vs YAML Comparison
+
+| Dimension / Feature | JSON | YAML | XUN |
+| :--- | :--- | :--- | :--- |
+| **Quotes Philosophy** | Mandatory double quotes (verbose, error-prone) | Mixed mode (complex & ambiguous rules) | **Unquoted by default** (clean and intuitive) |
+| **Type Inference** | Implicit inference (limited types) | **Guessed inference** (causes implicit bugs) | **Explicitly tagged, never guessed** (WYSIWYG) |
+| **Norway Problem (`NO`)** | Evaluates to string `"NO"` | ❌ Coerced into boolean `false` | ✅ **Strict string `NO`** |
+| **Version (`3.10`)** | Requires quotes `"3.10"` | ❌ Coerced into float `3.1` | ✅ **`!ver 3.10` (segment-preserved)** |
+| **Comments Support** | ❌ No official support | ✅ Supports `#` comments | ✅ **Native `#` line comments** |
+| **Multiline Strings** | ❌ Crammed on one line with `\n` | Indentation-sensitive (`\|`, `>`, `\|-`) | ✅ **`\|` Explicit delimiter closer, zero ambiguity** |
+| **Rich Data Types** | No native date/time/tz/bytes | Syntax bloat and parser divergence | ✅ **Built-in 20 core types + Custom Tags** |
+| **Security & Complexity** | Simple but low expressiveness | Complex & fragile (vulnerable to RCE) | ✅ **Deterministic grammar, zero RCE risk** |
+| **Null Model** | Contains `null` | Contains `null` / `~` | **No `null`** (absent key or empty string `key:`) |
+
+### Side-by-Side Example
+
+```xun
+# XUN: clean, unquoted, zero ambiguity, native multiline and comments
+server:
+  host: localhost
+  port: !n 8080
+  tls: !b true
+
+version: !ver 3.10
+country: NO
+color: !xb FF00AA
+
+description: |
+  Welcome to XUN!
+  Clean and safe.
+|
+```
+
+```json
+// JSON: heavy quotes, no comments, no multiline, limited types
+{
+  "server": {
+    "host": "localhost",
+    "port": 8080,
+    "tls": true
+  },
+  "version": "3.10",
+  "country": "NO",
+  "color": "FF00AA",
+  "description": "Welcome to XUN!\nClean and safe."
+}
+```
+
+```yaml
+# YAML: implicit guessing pitfalls (must guard against 3.10 -> 3.1, NO -> false)
+server:
+  host: localhost
+  port: 8080
+  tls: true
+
+version: "3.10"   # Must quote, otherwise becomes 3.1
+country: "NO"     # Must quote, otherwise becomes false
+color: "FF00AA"   # No native byte literal
+
+description: |
+  Welcome to XUN!
+  Clean and safe.
+```
+
+---
+
 ## Example
 
 ```xun
