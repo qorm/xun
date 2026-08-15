@@ -124,7 +124,7 @@ test("encode nested objects and arrays", () => {
 test("file write and read round-trip", () => {
   const data = {
     app: "xun-demo",
-    version: new Tagged("ver", "0.1.1"),
+    version: new Tagged("ver", "0.1.2"),
     server: {
       host: "0.0.0.0",
       port: 9000,
@@ -145,7 +145,7 @@ test("file write and read round-trip", () => {
     const doc = decode(readText);
 
     assert.equal(doc.app, "xun-demo");
-    assert.deepEqual(doc.version, new Tagged("ver", "0.1.1"));
+    assert.deepEqual(doc.version, new Tagged("ver", "0.1.2"));
     assert.equal(doc.server.host, "0.0.0.0");
     assert.equal(doc.server.port, 9000);
     assert.equal(doc.server.ssl, true);

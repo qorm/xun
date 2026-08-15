@@ -71,7 +71,7 @@ public final class XunTest {
   static void testFileWriteAndRead() throws Exception {
     Map<String, Object> data = new LinkedHashMap<>();
     data.put("app", "java-xun");
-    data.put("version", new Xun.Tagged("ver", "0.1.1"));
+    data.put("version", new Xun.Tagged("ver", "0.1.2"));
     data.put("port", 8080L);
     data.put("tags", List.of("jvm", "xun"));
     data.put("raw", new byte[] {(byte) 0x12, (byte) 0x34});
@@ -85,7 +85,7 @@ public final class XunTest {
       String content = Files.readString(tmp);
       Map<String, Object> parsed = Xun.parse(content);
       eq(parsed.get("app"), "java-xun", "file app");
-      eq(parsed.get("version"), new Xun.Tagged("ver", "0.1.1"), "file ver");
+      eq(parsed.get("version"), new Xun.Tagged("ver", "0.1.2"), "file ver");
       eq(parsed.get("port"), 8080L, "file port");
       eq(parsed.get("tags"), List.of("jvm", "xun"), "file tags");
       eq(parsed.get("raw"), new byte[] {(byte) 0x12, (byte) 0x34}, "file raw");
