@@ -14,68 +14,157 @@ Compared with TOML: deep nesting relies naturally on indentation without repeati
 
 ---
 
-## XUN vs JSON vs YAML Comparison
+## Cross-Format Panoramic Comparison
 
-| Dimension / Feature | JSON | YAML | XUN |
-| :--- | :--- | :--- | :--- |
-| **Quotes Philosophy** | Mandatory double quotes (verbose, error-prone) | Mixed mode (complex & ambiguous rules) | **Unquoted by default** (clean and intuitive) |
-| **Type Inference** | Implicit inference (limited types) | **Guessed inference** (causes implicit bugs) | **Explicitly tagged, never guessed** (WYSIWYG) |
-| **Norway Problem (`NO`)** | Evaluates to string `"NO"` | ❌ Coerced into boolean `false` | ✅ **Strict string `NO`** |
-| **Version (`3.10`)** | Requires quotes `"3.10"` | ❌ Coerced into float `3.1` | ✅ **`!ver 3.10` (segment-preserved)** |
-| **Comments Support** | ❌ No official support | ✅ Supports `#` comments | ✅ **Native `#` line comments** |
-| **Multiline Strings** | ❌ Crammed on one line with `\n` | Indentation-sensitive (`\|`, `>`, `\|-`) | ✅ **`\|` Explicit delimiter closer, zero ambiguity** |
-| **Rich Data Types** | No native date/time/tz/bytes | Syntax bloat and parser divergence | ✅ **Built-in 20 core types + Custom Tags** |
-| **Security & Complexity** | Simple but low expressiveness | Complex & fragile (vulnerable to RCE) | ✅ **Deterministic grammar, zero RCE risk** |
-| **Null Model** | Contains `null` | Contains `null` / `~` | **No `null`** (absent key or empty string `key:`) |
+| Dimension / Feature | JSON / JSONC | YAML | TOML | HCL | INI / Properties | **XUN** |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **Quotes Philosophy** | Mandatory double quotes (verbose) | Mixed mode (complex & ambiguous) | Keys optional, strings require quotes | Quotes required, identifiers unquoted | Unquoted raw text | **Unquoted by default** (clean & intuitive) |
+| **Type Inference** | Implicit inference (limited types) | **Guessed inference** (implicit bugs) | Implicit inference (typed literals) | Typed expressions system | Pure strings, no types | **Explicitly tagged, never guessed** (WYSIWYG) |
+| **Norway Problem (`NO`)** | Strict string `"NO"` | ❌ Coerced into boolean `false` | Strict string `"NO"` | String / Identifier | Raw text `NO` | ✅ **Strict string `NO`** |
+| **Version (`3.10`)** | Requires quotes `"3.10"` | ❌ Coerced into float `3.1` | Requires quotes `"3.10"` | Requires quotes `"3.10"` | Raw text `3.10` | ✅ **`!ver 3.10` (segment-preserved)** |
+| **Comments Support** | ❌ JSON does not support | ✅ Supports `#` comments | ✅ Supports `#` comments | ✅ Supports `#` and `//` | ✅ Supports `;` or `#` | ✅ **Native `#` line comments** |
+| **Multiline Strings** | ❌ Crammed on one line with `\n` | Indentation-sensitive (`\|`, `>`, `\|-`) | Triple quotes `"""` | Heredoc `<<EOF` | ❌ Not supported or `\` | ✅ **`\|` Explicit delimiter closer, zero ambiguity** |
+| **Deep Nesting** | Heavy braces & commas noise | Indentation nesting | Repeated long headers `[a.b.c.d]` | Block nesting `{}` | ❌ Cannot nest deeply | ✅ **Strict 2-space indentation hierarchy** |
+| **Rich Domain Types** | Basic primitives only | Syntax bloat & parser divergence | Date/time/numbers only | Expression functions | None | ✅ **Built-in 20 core Tags + Custom** |
+| **Spec & Complexity** | Simple & lightweight | Extremely complex (hundreds of pages) | Moderate | Complex (expressions) | Ad-hoc, non-standard | ✅ **Compact, deterministic & strict** |
+| **Security & RCE Risk** | Safe | ⚠️ Vulnerable to code execution | Safe | Safe | Safe | ✅ **Pure data notation, zero code exec risk** |
+| **Null Model** | `null` | `null` / `~` | No `null` | `null` | Empty string | **No `null`** (absent key or empty `key:`) |
 
-### Side-by-Side Example
+---
 
+### Key Pain Points & Trade-offs
+
+#### 1. The Type Coercion Trap
+- **YAML Pitfall**: YAML attempts to "guess" data types from bare tokens, causing `country: NO` to become boolean `false` (the infamous Norway Problem); version numbers like `version: 3.10` are coerced into float `3.1`; and leading zeros like `port: 012` are coerced into octal integers.
+- **XUN Solution**: **Untagged scalars are 100% pure strings** without guessing. When specific data types are required, explicit tags (`!ver 3.10`, `!n 8080`, `!b true`) eliminate all coercion bugs.
+
+#### 2. Deep Nesting Ergonomics
+- **JSON Pitfall**: Multiple layers of braces, brackets, and trailing commas create visual noise and frequent syntax errors during manual edits.
+- **TOML Pitfall**: Deeply nested tables require repeating long table headers (e.g., `[server.database.replica.pool]`), fragmenting readability across large documents.
+- **XUN Solution**: Strict **2 ASCII spaces per level**, with mutually exclusive dict/list elements per level, providing clean, human-readable hierarchy.
+
+#### 3. Multiline Text & Embedded Scripts
+- **JSON Pitfall**: No multiline literal support; long SQL, PromQL, or shell scripts must be escaped into a single unwieldy line with `\n`.
+- **YAML Pitfall**: Multiline blocks rely purely on indentation; blank lines or indentation variations frequently result in unintended line stripping or syntax errors.
+- **XUN Solution**: **Explicit delimiter closers** (starting with `|` and closing at opener level with `|`, or custom `|SQL ... SQL`), preserving internal contents without truncation ambiguity.
+
+#### 4. Native Domain-Specific Data Types
+- **Conventional Limits**: JSON, YAML, and TOML cannot natively express IP addresses, byte sizes (`10MiB`), durations (`1d2h`), hex bytes (`FF00AA`), or IANA timezones—forcing downstream applications to implement custom regex parsing.
+- **XUN Solution**: Built-in **20 standard core tags** with official SDK helpers (`unpack`, `parse_size`, `parse_duration`, `parse_version`) across 6 major languages.
+
+---
+
+### Side-by-Side Comparison across 5 Popular Formats
+
+#### 1. XUN (Clean, unquoted, zero ambiguity, native multiline)
 ```xun
-# XUN: clean, unquoted, zero ambiguity, native multiline and comments
 server:
   host: localhost
   port: !n 8080
-  tls: !b true
+  bind: !ip ::1
+  tls:
+    cert: /etc/ssl/cert.pem
+    mode: !o 755
 
 version: !ver 3.10
 country: NO
+timeout: !du 30s
+limit: !sz 10MiB
 color: !xb FF00AA
 
 description: |
   Welcome to XUN!
-  Clean and safe.
+  Clean, safe, and unquoted.
 |
 ```
 
+#### 2. YAML (Implicit guessing traps, manual quoting required)
+```yaml
+server:
+  host: localhost
+  port: 8080
+  bind: "::1"
+  tls:
+    cert: /etc/ssl/cert.pem
+    mode: 0755
+
+version: "3.10"   # Must quote, otherwise becomes 3.1
+country: "NO"     # Must quote, otherwise becomes false
+timeout: "30s"    # Must be parsed downstream
+limit: "10MiB"    # Must be parsed downstream
+color: "FF00AA"   # No native bytes literal
+
+description: |
+  Welcome to XUN!
+  Clean, safe, and unquoted.
+```
+
+#### 3. TOML (Repeated table headers on deep nesting, no native bytes/size)
+```toml
+version = "3.10"
+country = "NO"
+timeout = "30s"
+limit = "10MiB"
+color = "FF00AA"
+
+description = """
+Welcome to XUN!
+Clean, safe, and unquoted.
+"""
+
+[server]
+host = "localhost"
+port = 8080
+bind = "::1"
+
+[server.tls]
+cert = "/etc/ssl/cert.pem"
+mode = 0o755
+```
+
+#### 4. JSON (No comments, heavy quotes noise, no multiline)
 ```json
-// JSON: heavy quotes, no comments, no multiline, limited types
 {
   "server": {
     "host": "localhost",
     "port": 8080,
-    "tls": true
+    "bind": "::1",
+    "tls": {
+      "cert": "/etc/ssl/cert.pem",
+      "mode": 493
+    }
   },
   "version": "3.10",
   "country": "NO",
+  "timeout": "30s",
+  "limit": "10MiB",
   "color": "FF00AA",
-  "description": "Welcome to XUN!\nClean and safe."
+  "description": "Welcome to XUN!\nClean, safe, and unquoted."
 }
 ```
 
-```yaml
-# YAML: implicit guessing pitfalls (must guard against 3.10 -> 3.1, NO -> false)
-server:
-  host: localhost
-  port: 8080
-  tls: true
+#### 5. HCL (Terraform-style block notation)
+```hcl
+server {
+  host = "localhost"
+  port = 8080
+  bind = "::1"
+  tls {
+    cert = "/etc/ssl/cert.pem"
+    mode = "0755"
+  }
+}
 
-version: "3.10"   # Must quote, otherwise becomes 3.1
-country: "NO"     # Must quote, otherwise becomes false
-color: "FF00AA"   # No native byte literal
+version = "3.10"
+country = "NO"
+timeout = "30s"
+limit   = "10MiB"
+color   = "FF00AA"
 
-description: |
+description = <<-EOF
   Welcome to XUN!
-  Clean and safe.
+  Clean, safe, and unquoted.
+EOF
 ```
 
 ---
