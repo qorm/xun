@@ -516,8 +516,32 @@ int main(void) {
 }
 ```
 
+---
+
+## Editor Syntax Highlighting & Tooling
+
+XUN provides out-of-the-box syntax highlighting and language configuration for major text editors:
+
+### 1. Visual Studio Code
+The official extension package is located in [`editors/vscode/`](editors/vscode/), providing syntax coloring, 2-space indentation rules, and folding markers for `.xun` files:
+- **Local Installation**: Copy or symlink [`editors/vscode`](editors/vscode/) to your VS Code extensions folder:
+  - **macOS / Linux**: `~/.vscode/extensions/vscode-xun`
+  - **Windows**: `%USERPROFILE%\.vscode\extensions\vscode-xun`
+- **TextMate Grammar**: [`syntaxes/xun.tmLanguage.json`](syntaxes/xun.tmLanguage.json)
+
+### 2. Vim / NeoVim
+- Syntax definition: [`editors/vim/syntax/xun.vim`](editors/vim/syntax/xun.vim)
+- Place in `~/.vim/syntax/xun.vim` and add the following to `~/.vim/filetype.vim`:
+  ```vim
+  autocmd BufNewFile,BufRead *.xun setfiletype xun
+  ```
+
+### 3. Sublime Text
+- Syntax definition: [`editors/sublime/XUN.sublime-syntax`](editors/sublime/XUN.sublime-syntax)
+- Place in your Sublime Text `Packages/User/` directory.
 
 ---
+
 
 ## Explicitly Out of Scope
 

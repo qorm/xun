@@ -516,8 +516,32 @@ int main(void) {
 }
 ```
 
+---
+
+## 编辑器语法高亮与工具链支持
+
+XUN 提供了开箱即用的主流编辑器语法高亮与语言支持配置文件：
+
+### 1. Visual Studio Code
+官方扩展包位于 [`editors/vscode/`](editors/vscode/)，提供了对 `.xun` 文件的精准语法着色、2 格缩进及代码折叠：
+- **本地安装**：将 [`editors/vscode`](editors/vscode/) 目录复制或软链接至 VS Code 插件目录：
+  - **macOS / Linux**: `~/.vscode/extensions/vscode-xun`
+  - **Windows**: `%USERPROFILE%\.vscode\extensions\vscode-xun`
+- **TextMate 语法文件**：[`syntaxes/xun.tmLanguage.json`](syntaxes/xun.tmLanguage.json)
+
+### 2. Vim / NeoVim
+- 语法文件：[`editors/vim/syntax/xun.vim`](editors/vim/syntax/xun.vim)
+- 放置于 `~/.vim/syntax/xun.vim`，并在 `~/.vim/filetype.vim` 中添加：
+  ```vim
+  autocmd BufNewFile,BufRead *.xun setfiletype xun
+  ```
+
+### 3. Sublime Text
+- 语法文件：[`editors/sublime/XUN.sublime-syntax`](editors/sublime/XUN.sublime-syntax)
+- 放置于 Sublime Text 的 `Packages/User/` 目录下即可。
 
 ---
+
 
 ## 明确不做
 

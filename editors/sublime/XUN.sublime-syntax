@@ -1,0 +1,46 @@
+%YAML 1.2
+---
+name: XUN
+file_extensions:
+  - xun
+scope: source.xun
+
+contexts:
+  main:
+    - match: '^\s*#.*$'
+      scope: comment.line.number-sign.xun
+
+    - match: ':\s*\|([a-zA-Z0-9_-]*)'
+      scope: punctuation.definition.string.begin.xun
+      push: multiline
+
+    - match: '^\s*([^\s#:\[\]{}!\-]+)\s*(:)'
+      captures:
+        1: entity.name.tag.xun
+        2: punctuation.separator.key-value.xun
+
+    - match: '^\s*(-)\s+'
+      captures:
+        1: punctuation.definition.list.xun
+
+    - match: '!(s|n|i|f|x|xb|o|b|d|t|dt|tz|du|sz|unix|ver|uuid|ip|b64|c|[a-zA-Z0-9_-]+)'
+      scope: keyword.operator.tag.xun
+
+    - match: '\b(true|false)\b'
+      scope: constant.language.boolean.xun
+
+    - match: '\b0x[0-9a-fA-F_]+\b'
+      scope: constant.numeric.hex.xun
+
+    - match: '\b[-+]?\d+(_\d+)*\.\d+([eE][-+]?\d+)?\b'
+      scope: constant.numeric.float.xun
+
+    - match: '\b[-+]?\d+(_\d+)*\b'
+      scope: constant.numeric.integer.xun
+
+  multiline:
+    - match: '^\s*\|.*$'
+      scope: punctuation.definition.string.end.xun
+      pop: true
+    - match: '.+'
+      scope: string.unquoted.multiline.xun
