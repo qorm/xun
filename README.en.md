@@ -520,25 +520,33 @@ int main(void) {
 
 ## Editor Syntax Highlighting & Tooling
 
-XUN provides out-of-the-box syntax highlighting and language configuration for major text editors:
+XUN provides out-of-the-box syntax highlighting and language configuration for major text editors. See the [Editor Syntax Guide](syntaxes/README.md) for full instructions:
 
-### 1. Visual Studio Code
-The official extension package is located in [`editors/vscode/`](editors/vscode/), providing syntax coloring, 2-space indentation rules, and folding markers for `.xun` files:
-- **Local Installation**: Copy or symlink [`editors/vscode`](editors/vscode/) to your VS Code extensions folder:
-  - **macOS / Linux**: `~/.vscode/extensions/vscode-xun`
-  - **Windows**: `%USERPROFILE%\.vscode\extensions\vscode-xun`
+### 1. VS Code / Cursor / Windsurf
+The official extension package is located in [`editors/vscode/`](editors/vscode/), providing syntax coloring, 2-space indentation rules, and folding markers for `.xun` files.
+- **One-command Symlink Installation**:
+  ```bash
+  # VS Code
+  mkdir -p ~/.vscode/extensions && ln -s "$(pwd)/editors/vscode" ~/.vscode/extensions/vscode-xun
+  # Cursor
+  mkdir -p ~/.cursor/extensions && ln -s "$(pwd)/editors/vscode" ~/.cursor/extensions/vscode-xun
+  ```
 - **TextMate Grammar**: [`syntaxes/xun.tmLanguage.json`](syntaxes/xun.tmLanguage.json)
 
-### 2. Vim / NeoVim
-- Syntax definition: [`editors/vim/syntax/xun.vim`](editors/vim/syntax/xun.vim)
-- Place in `~/.vim/syntax/xun.vim` and add the following to `~/.vim/filetype.vim`:
-  ```vim
-  autocmd BufNewFile,BufRead *.xun setfiletype xun
+### 2. JetBrains IDEs (IntelliJ IDEA / WebStorm / PyCharm / GoLand)
+1. Open `Settings` / `Preferences` -> `Editor` -> `TextMate Bundles`;
+2. Click `+` and select the [`syntaxes/`](syntaxes/) directory from this repository.
+
+### 3. Vim / NeoVim
+- **Installation**:
+  ```bash
+  mkdir -p ~/.vim/syntax ~/.vim/ftdetect
+  cp editors/vim/syntax/xun.vim ~/.vim/syntax/
+  echo 'autocmd BufNewFile,BufRead *.xun setfiletype xun' > ~/.vim/ftdetect/xun.vim
   ```
 
-### 3. Sublime Text
-- Syntax definition: [`editors/sublime/XUN.sublime-syntax`](editors/sublime/XUN.sublime-syntax)
-- Place in your Sublime Text `Packages/User/` directory.
+### 4. Sublime Text
+- Copy [`editors/sublime/XUN.sublime-syntax`](editors/sublime/XUN.sublime-syntax) to your Sublime Text `Packages/User/` directory.
 
 ---
 

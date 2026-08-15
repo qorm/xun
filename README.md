@@ -520,25 +520,33 @@ int main(void) {
 
 ## 编辑器语法高亮与工具链支持
 
-XUN 提供了开箱即用的主流编辑器语法高亮与语言支持配置文件：
+XUN 提供了开箱即用的主流编辑器语法高亮与语言支持配置文件，详细图文指南参见 [语法高亮使用文档](syntaxes/README.md)：
 
-### 1. Visual Studio Code
-官方扩展包位于 [`editors/vscode/`](editors/vscode/)，提供了对 `.xun` 文件的精准语法着色、2 格缩进及代码折叠：
-- **本地安装**：将 [`editors/vscode`](editors/vscode/) 目录复制或软链接至 VS Code 插件目录：
-  - **macOS / Linux**: `~/.vscode/extensions/vscode-xun`
-  - **Windows**: `%USERPROFILE%\.vscode\extensions\vscode-xun`
-- **TextMate 语法文件**：[`syntaxes/xun.tmLanguage.json`](syntaxes/xun.tmLanguage.json)
+### 1. VS Code / Cursor / Windsurf
+官方扩展位于 [`editors/vscode/`](editors/vscode/)，支持语法着色、2 格缩进与代码折叠。
+- **一键安装（软链接）**：
+  ```bash
+  # VS Code
+  mkdir -p ~/.vscode/extensions && ln -s "$(pwd)/editors/vscode" ~/.vscode/extensions/vscode-xun
+  # Cursor
+  mkdir -p ~/.cursor/extensions && ln -s "$(pwd)/editors/vscode" ~/.cursor/extensions/vscode-xun
+  ```
+- **TextMate 语法定义**：[`syntaxes/xun.tmLanguage.json`](syntaxes/xun.tmLanguage.json)
 
-### 2. Vim / NeoVim
-- 语法文件：[`editors/vim/syntax/xun.vim`](editors/vim/syntax/xun.vim)
-- 放置于 `~/.vim/syntax/xun.vim`，并在 `~/.vim/filetype.vim` 中添加：
-  ```vim
-  autocmd BufNewFile,BufRead *.xun setfiletype xun
+### 2. JetBrains 系列 (IntelliJ IDEA / WebStorm / PyCharm / GoLand)
+1. 打开 `Settings` / `Preferences` -> `Editor` -> `TextMate Bundles`；
+2. 点击 `+` 添加本项目的 [`syntaxes/`](syntaxes/) 目录即可自动启用高亮。
+
+### 3. Vim / NeoVim
+- **一键安装**：
+  ```bash
+  mkdir -p ~/.vim/syntax ~/.vim/ftdetect
+  cp editors/vim/syntax/xun.vim ~/.vim/syntax/
+  echo 'autocmd BufNewFile,BufRead *.xun setfiletype xun' > ~/.vim/ftdetect/xun.vim
   ```
 
-### 3. Sublime Text
-- 语法文件：[`editors/sublime/XUN.sublime-syntax`](editors/sublime/XUN.sublime-syntax)
-- 放置于 Sublime Text 的 `Packages/User/` 目录下即可。
+### 4. Sublime Text
+- 将 [`editors/sublime/XUN.sublime-syntax`](editors/sublime/XUN.sublime-syntax) 复制到 Sublime Text 的 `Packages/User/` 目录下即可。
 
 ---
 
