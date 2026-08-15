@@ -1,16 +1,19 @@
 # @qorm/xun
 
-Parser for [XUN](https://github.com/qorm/xun) (X Unquoted Notation).
+Parser and encoder for [XUN](https://github.com/qorm/xun) (X Unquoted Notation).
 
 ```bash
 npm install @qorm/xun
 ```
 
 ```js
-import { readFileSync } from "node:fs";
-import { parse } from "@qorm/xun";
+import { readFileSync, writeFileSync } from "node:fs";
+import { parse, encode } from "@qorm/xun";
 
+// Parse
 const doc = parse(readFileSync("config.xun", "utf8"));
-```
 
-`parse` takes the file contents as a UTF-8 string, not a path.
+// Encode
+const text = encode(doc);
+writeFileSync("output.xun", text, "utf8");
+```

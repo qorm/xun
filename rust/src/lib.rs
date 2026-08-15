@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-
 #[derive(Debug, Clone, PartialEq)]
 pub struct Tagged {
     pub tag: String,
@@ -62,8 +60,6 @@ pub fn parse(source: &str) -> Result<Value, Error> {
     Parser {
         lines: split_lines(source)?,
         i: 0,
-        env: HashMap::new(),
-        resolving: HashMap::new(),
     }
     .parse_document()
 }
@@ -121,8 +117,6 @@ fn make_line(raw: &str, n: usize) -> Result<Line, Error> {
 struct Parser {
     lines: Vec<Line>,
     i: usize,
-    env: HashMap<String, Value>,
-    resolving: HashMap<String, bool>,
 }
 
 impl Parser {
@@ -141,7 +135,6 @@ impl Parser {
     }
 
     fn parse_document(&mut self) -> Result<Value, Error> {
-        self.parse_vars()?;
         self.skip_noise();
         if self.peek().is_none() {
             return Ok(Value::Dict(vec![]));
@@ -156,46 +149,22 @@ impl Parser {
         self.parse_dict(0, 0)
     }
 
-    fn parse_vars(&mut self) -> Result<(), Error> {
-        while let Some(l) = self.peek() {
-            if l.blank || l.text.starts_with('#') {
-                self.i += 1;
-                continue;
-            }
-            if l.indent != 0 || !l.text.starts_with('$') {
-                break;
-            }
-            let text = l.text.clone();
-            let n = l.n;
-            let Some((name, rest)) = parse_var_def(&text) else {
-                return Err(err(n, "invalid variable definition"));
-            };
-            if self.env.contains_key(&name) {
-                return Err(err(n, format!("duplicate variable ${name}")));
-            }
-            self.i += 1;
-            let val = self.parse_value(&rest, 0, n, 1)?;
-            self.env.insert(name, val);
-        }
-        Ok(())
-    }
-
     fn parse_dict(&mut self, indent: usize, depth: usize) -> Result<Value, Error> {
         if depth > 64 {
-            return Err(err(self.peek().map(|l| l.n).unwrap_or(0), "nesting exceeds 64"));
+            let n = self.peek().map(|l| l.n).unwrap_or(0);
+            return Err(err(n, "nesting exceeds 64"));
         }
         let mut obj = Vec::new();
-        loop {
-            self.skip_noise();
-            let Some(l) = self.peek() else { break };
-            if l.blank || l.indent < indent {
+        while let Some(l) = self.peek() {
+            if l.blank {
+                self.skip_noise();
+                continue;
+            }
+            if l.indent < indent {
                 break;
             }
             if l.indent > indent {
                 return Err(err(l.n, "invalid indent jump"));
-            }
-            if l.text.starts_with('$') && indent == 0 {
-                return Err(err(l.n, "variable definitions only allowed at file start"));
             }
             if self.is_list_item(l) {
                 return Err(err(l.n, "cannot mix list items into a dictionary"));
@@ -214,11 +183,17 @@ impl Parser {
     }
 
     fn parse_list(&mut self, indent: usize, depth: usize, item_tag: Option<&str>) -> Result<Value, Error> {
+        if depth > 64 {
+            let n = self.peek().map(|l| l.n).unwrap_or(0);
+            return Err(err(n, "nesting exceeds 64"));
+        }
         let mut arr = Vec::new();
-        loop {
-            self.skip_noise();
-            let Some(l) = self.peek() else { break };
-            if l.blank || l.indent < indent {
+        while let Some(l) = self.peek() {
+            if l.blank {
+                self.skip_noise();
+                continue;
+            }
+            if l.indent < indent {
                 break;
             }
             if l.indent > indent {
@@ -227,16 +202,13 @@ impl Parser {
             if !self.is_list_item(l) {
                 return Err(err(l.n, "cannot mix dictionary keys into a list"));
             }
-            let rest = if l.text == "-" {
-                String::new()
-            } else {
-                l.text[2..].to_string()
-            };
+            let text = l.text.clone();
             let n = l.n;
+            let rest = if text == "-" { "" } else { &text[2..] };
             self.i += 1;
-            let mut val = self.parse_value(&rest, indent, n, depth + 1)?;
-            if let Some(tag) = item_tag {
-                val = apply_tag(tag, &glyph_of(&val)?, n)?;
+            let mut val = self.parse_value(rest, indent, n, depth + 1)?;
+            if let Some(t) = item_tag {
+                val = apply_tag(t, &glyph_of(&val)?, n)?;
             }
             arr.push(val);
         }
@@ -255,85 +227,88 @@ impl Parser {
             return Ok(Value::Dict(vec![]));
         }
         if let Some(closer) = match_multiline(raw) {
-            return self.read_multiline(parent_indent, &closer, line_no);
+            return self.read_multiline(parent_indent, None, &closer, line_no);
         }
-        if let Some(rest) = raw.strip_prefix('!') {
-            return self.parse_tagged(rest, parent_indent, line_no, depth);
+        if raw.starts_with('!') {
+            return self.parse_tagged(raw, parent_indent, line_no, depth);
         }
         if raw.is_empty() {
             return self.parse_empty_or_nested(parent_indent, line_no, depth, None);
         }
-        if is_whole_ref(raw) {
-            return self.lookup(&raw[1..], line_no);
-        }
-        interpolate(raw, &mut |name| self.lookup(name, line_no))
+        Ok(Value::String(raw.to_string()))
     }
 
-    fn parse_tagged(&mut self, rest0: &str, parent_indent: usize, line_no: usize, depth: usize) -> Result<Value, Error> {
-        let (tag, rest) = split_ident(rest0).ok_or_else(|| err(line_no, "invalid type tag"))?;
-        if let Some(inner_all) = rest.strip_prefix('[') {
+    fn parse_tagged(&mut self, raw: &str, parent_indent: usize, line_no: usize, depth: usize) -> Result<Value, Error> {
+        let (tag, rest) = parse_tag_head(raw).ok_or_else(|| err(line_no, "invalid type tag"))?;
+        if let Some(inner) = rest.strip_prefix('[') {
             if tag == "s" && rest != "[]" {
                 return Err(err(line_no, "string arrays cannot use compact form"));
             }
-            let inner = inner_all.strip_suffix(']').ok_or_else(|| err(line_no, "unclosed compact array"))?;
+            let Some(inner) = inner.strip_suffix(']') else {
+                return Err(err(line_no, "unclosed compact array"));
+            };
             if inner.is_empty() {
-                return self.parse_empty_or_nested(parent_indent, line_no, depth, Some(tag));
+                return self.parse_empty_or_nested(parent_indent, line_no, depth, Some(&tag));
             }
             let mut out = Vec::new();
-            for g in inner.split(',') {
-                out.push(apply_tag(tag, g.trim(), line_no)?);
+            for g in split_compact(inner) {
+                out.push(apply_tag(&tag, g, line_no)?);
             }
             return Ok(Value::List(out));
         }
         if rest.is_empty() {
             return Err(err(line_no, format!("missing value for !{tag}")));
         }
-        let body = rest.strip_prefix(' ').ok_or_else(|| err(line_no, "expected space after type tag"))?;
+        let Some(body) = rest.strip_prefix(' ') else {
+            return Err(err(line_no, "expected space after type tag"));
+        };
         if let Some(closer) = match_multiline(body) {
-            let text = match self.read_multiline(parent_indent, &closer, line_no)? {
+            let text_val = self.read_multiline(parent_indent, None, &closer, line_no)?;
+            let text = match text_val {
                 Value::String(s) => s,
-                other => return Ok(other),
+                _ => unreachable!(),
             };
             if tag == "s" {
                 return Ok(Value::String(text));
             }
-            return apply_tag(tag, &text, line_no);
+            return apply_tag(&tag, &text, line_no);
         }
         if tag == "s" {
             return Ok(Value::String(body.to_string()));
         }
-        if is_whole_ref(body) {
-            return self.lookup(&body[1..], line_no);
-        }
-        apply_tag(tag, body, line_no)
+        apply_tag(&tag, body, line_no)
     }
 
     fn parse_empty_or_nested(&mut self, parent_indent: usize, _line_no: usize, depth: usize, item_tag: Option<&str>) -> Result<Value, Error> {
         self.skip_noise();
         let child = parent_indent + 2;
-        match self.peek() {
-            None => {
-                if item_tag.is_some() {
-                    Ok(Value::List(vec![]))
-                } else {
-                    Ok(Value::String(String::new()))
-                }
-            }
-            Some(n) if n.blank || n.indent <= parent_indent => {
-                if item_tag.is_some() {
-                    Ok(Value::List(vec![]))
-                } else {
-                    Ok(Value::String(String::new()))
-                }
-            }
-            Some(n) if n.indent != child => Err(err(n.n, "child indent must be parent + 2")),
-            Some(n) if self.is_list_item(n) => self.parse_list(child, depth, item_tag),
-            Some(n) if item_tag.is_some() => Err(err(n.n, "typed array expected list items")),
-            Some(_) => self.parse_dict(child, depth),
+        let Some(n) = self.peek() else {
+            return Ok(if item_tag.is_some() {
+                Value::List(vec![])
+            } else {
+                Value::String(String::new())
+            });
+        };
+        if n.blank || n.indent <= parent_indent {
+            return Ok(if item_tag.is_some() {
+                Value::List(vec![])
+            } else {
+                Value::String(String::new())
+            });
         }
+        if n.indent != child {
+            return Err(err(n.n, "child indent must be parent + 2"));
+        }
+        if self.is_list_item(n) {
+            return self.parse_list(child, depth, item_tag);
+        }
+        if let Some(t) = item_tag {
+            return Err(err(n.n, format!("!{t}[] expected list items")));
+        }
+        self.parse_dict(child, depth)
     }
 
-    fn read_multiline(&mut self, parent_indent: usize, closer: &str, line_no: usize) -> Result<Value, Error> {
+    fn read_multiline(&mut self, parent_indent: usize, tag: Option<&str>, closer: &str, line_no: usize) -> Result<Value, Error> {
         let base = parent_indent + 2;
         let mut parts = Vec::new();
         while let Some(l) = self.peek() {
@@ -342,233 +317,90 @@ impl Parser {
             let ind = l.raw.len() - l.raw.trim_start_matches(' ').len();
             if !l.blank && ind == parent_indent && content == closer {
                 self.i += 1;
-                return Ok(Value::String(parts.join("\n")));
+                let s = parts.join("\n");
+                if let Some(t) = tag {
+                    if t != "s" {
+                        return apply_tag(t, &s, line_no);
+                    }
+                }
+                return Ok(Value::String(s));
             }
             if l.blank {
                 parts.push(String::new());
                 self.i += 1;
                 continue;
             }
-            if ind < base {
+            if ind < base && !l.blank {
                 return Err(err(l.n, "multiline body must indent +2, or close at opener indent"));
             }
             if l.raw.contains('\t') {
                 return Err(err(l.n, "tab is not allowed"));
             }
-            parts.push(if l.raw.len() >= base {
-                l.raw[base..].to_string()
-            } else {
-                String::new()
-            });
+            parts.push(l.raw[base..].to_string());
             self.i += 1;
         }
         Err(err(line_no, "unclosed multiline block"))
     }
-
-    fn lookup(&mut self, name: &str, line_no: usize) -> Result<Value, Error> {
-        if !self.env.contains_key(name) {
-            return Err(err(line_no, format!("undefined variable ${name}")));
-        }
-        if self.resolving.get(name).copied().unwrap_or(false) {
-            return Err(err(line_no, format!("cyclic variable ${name}")));
-        }
-        let v = self.env.get(name).unwrap().clone();
-        if let Value::String(s) = &v {
-            if is_whole_ref(s) {
-                self.resolving.insert(name.to_string(), true);
-                let r = self.lookup(&s[1..], line_no);
-                self.resolving.remove(name);
-                let r = r?;
-                self.env.insert(name.to_string(), r.clone());
-                return Ok(r);
-            }
-        }
-        Ok(v)
-    }
-}
-
-fn parse_var_def(text: &str) -> Option<(String, String)> {
-    let rest = text.strip_prefix('$')?;
-    let (name, after) = split_ident(rest)?;
-    let after = after.strip_prefix(':')?;
-    if !after.is_empty() && !after.starts_with(' ') {
-        return None;
-    }
-    let raw = after.strip_prefix(' ').unwrap_or("").to_string();
-    Some((name.to_string(), raw))
-}
-
-fn split_ident(s: &str) -> Option<(&str, &str)> {
-    let mut i = 0;
-    let b = s.as_bytes();
-    if i >= b.len() || !(b[i].is_ascii_alphabetic() || b[i] == b'_') {
-        return None;
-    }
-    i += 1;
-    while i < b.len() && (b[i].is_ascii_alphanumeric() || b[i] == b'_') {
-        i += 1;
-    }
-    Some((&s[..i], &s[i..]))
 }
 
 fn split_key(text: &str, n: usize) -> Result<(String, String), Error> {
-    if let Some(i) = text.find(": ") {
-        if i > 0 {
-            return Ok((text[..i].to_string(), text[i + 2..].to_string()));
-        }
+    if let Some(idx) = text.find(": ") {
+        return Ok((text[..idx].to_string(), text[idx + 2..].to_string()));
     }
-    if let Some(key) = text.strip_suffix(':') {
-        if !key.is_empty() {
-            return Ok((key.to_string(), String::new()));
-        }
+    if text.ends_with(':') && text.len() > 1 {
+        return Ok((text[..text.len() - 1].to_string(), String::new()));
     }
     Err(err(n, "expected ': ' or trailing ':'"))
 }
 
 fn match_multiline(raw: &str) -> Option<String> {
     if raw == "|" {
-        return Some("|".into());
+        return Some("|".to_string());
     }
-    raw.strip_prefix('|').and_then(|t| {
-        if t.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') && t.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_') {
-            Some(t.to_string())
-        } else {
-            None
+    if let Some(rest) = raw.strip_prefix('|') {
+        if is_ident(rest) {
+            return Some(rest.to_string());
         }
-    })
-}
-
-fn is_whole_ref(raw: &str) -> bool {
-    let Some(n) = raw.strip_prefix('$') else {
-        return false;
-    };
-    let mut chars = n.chars();
-    let Some(first) = chars.next() else {
-        return false;
-    };
-    (first.is_ascii_alphabetic() || first == '_')
-        && n.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
-}
-
-fn interpolate(s: &str, get: &mut dyn FnMut(&str) -> Result<Value, Error>) -> Result<Value, Error> {
-    let mut out = String::new();
-    let mut rest = s;
-    while let Some(i) = rest.find("${") {
-        out.push_str(&rest[..i]);
-        rest = &rest[i + 2..];
-        let Some(end) = rest.find('}') else {
-            out.push_str("${");
-            continue;
-        };
-        let name = &rest[..end];
-        out.push_str(&glyph_of(&get(name)?)?);
-        rest = &rest[end + 1..];
     }
-    out.push_str(rest);
-    Ok(Value::String(out))
+    None
+}
+
+fn is_ident(s: &str) -> bool {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+fn parse_tag_head(raw: &str) -> Option<(String, String)> {
+    let s = raw.strip_prefix('!')?;
+    let end = s.find(|c: char| !(c.is_ascii_alphanumeric() || c == '_')).unwrap_or(s.len());
+    if end == 0 {
+        return None;
+    }
+    let tag = &s[..end];
+    if !is_ident(tag) {
+        return None;
+    }
+    Some((tag.to_string(), s[end..].to_string()))
+}
+
+fn split_compact(inner: &str) -> Vec<&str> {
+    inner.split(',').map(|s| s.trim()).collect()
 }
 
 fn glyph_of(v: &Value) -> Result<String, Error> {
     match v {
-        Value::Tagged(t) => Ok(t.value.clone()),
-        Value::Bytes(b) => Ok(b.iter().map(|x| format!("{x:02x}")).collect()),
         Value::String(s) => Ok(s.clone()),
-        Value::Bool(true) => Ok("true".into()),
-        Value::Bool(false) => Ok("false".into()),
         Value::Int(i) => Ok(i.to_string()),
         Value::Float(f) => Ok(f.to_string()),
-        _ => Err(err(0, "cannot interpolate a collection")),
+        Value::Bool(b) => Ok(if *b { "true".into() } else { "false".into() }),
+        Value::Bytes(b) => Ok(hex_encode(b)),
+        Value::Tagged(t) => Ok(t.value.clone()),
+        _ => Err(err(0, "cannot stringify a collection as scalar glyph")),
     }
-}
-
-fn apply_tag(tag: &str, glyph: &str, n: usize) -> Result<Value, Error> {
-    match tag {
-        "s" => Ok(Value::String(glyph.to_string())),
-        "n" => parse_n(glyph, n),
-        "i" => parse_i(glyph, n).map(Value::Int),
-        "f" => parse_f(glyph, n).map(Value::Float),
-        "x" => {
-            let s = strip_underscores(glyph, n)?;
-            i64::from_str_radix(&s, 16)
-                .map(Value::Int)
-                .map_err(|_| err(n, "invalid hex integer"))
-        }
-        "xb" => {
-            let s = glyph.replace('_', "");
-            if s.len() % 2 != 0 || s.is_empty() {
-                return Err(err(n, "hex bytes must be an even number of digits"));
-            }
-            let mut b = Vec::new();
-            let chars: Vec<char> = s.chars().collect();
-            for i in (0..chars.len()).step_by(2) {
-                let byte = u8::from_str_radix(&format!("{}{}", chars[i], chars[i + 1]), 16)
-                    .map_err(|_| err(n, "hex bytes must be an even number of digits"))?;
-                b.push(byte);
-            }
-            Ok(Value::Bytes(b))
-        }
-        "o" => i64::from_str_radix(glyph, 8)
-            .map(Value::Int)
-            .map_err(|_| err(n, "invalid octal")),
-        "b" if glyph == "true" => Ok(Value::Bool(true)),
-        "b" if glyph == "false" => Ok(Value::Bool(false)),
-        "b" => Err(err(n, "boolean must be true or false")),
-        "d" if regex_date(glyph) => tagged("d", glyph),
-        "d" => Err(err(n, "invalid date")),
-        "t" if regex_time(glyph) => tagged("t", glyph),
-        "t" => Err(err(n, "invalid time")),
-        "dt" if regex_dt(glyph) => tagged("dt", glyph),
-        "dt" => Err(err(n, "datetime must include a timezone offset")),
-        "tz" => tagged("tz", glyph),
-        "du" => tagged("du", glyph),
-        "sz" => tagged("sz", glyph),
-        "unix" => parse_unix(glyph, n),
-        "ver" if glyph.chars().all(|c| c.is_ascii_digit() || c == '.') && glyph.chars().any(|c| c.is_ascii_digit()) => {
-            tagged("ver", glyph)
-        }
-        "ver" => Err(err(n, "invalid version")),
-        "uuid" if glyph.len() == 36 => tagged("uuid", glyph),
-        "uuid" => Err(err(n, "invalid uuid")),
-        "ip" => tagged("ip", glyph),
-        "b64" => {
-            let s: String = glyph.chars().filter(|c| !c.is_whitespace()).collect();
-            match b64_decode(&s) {
-                Some(b) => Ok(Value::Bytes(b)),
-                None => Err(err(n, "invalid base64")),
-            }
-        }
-        "c" => {
-            if let Some(hex) = glyph.strip_prefix("U+") {
-                let cp = u32::from_str_radix(hex, 16).map_err(|_| err(n, "invalid code point"))?;
-                let ch = char::from_u32(cp).ok_or_else(|| err(n, "invalid code point"))?;
-                tagged("c", &ch.to_string())
-            } else if glyph.chars().count() == 1 {
-                tagged("c", glyph)
-            } else {
-                Err(err(n, "character must be a single scalar"))
-            }
-        }
-        _ => tagged(tag, glyph),
-    }
-}
-
-fn tagged(tag: &str, value: &str) -> Result<Value, Error> {
-    Ok(Value::Tagged(Tagged {
-        tag: tag.into(),
-        value: value.into(),
-    }))
-}
-
-fn regex_date(g: &str) -> bool {
-    g.len() == 10 && g.as_bytes()[4] == b'-' && g.as_bytes()[7] == b'-'
-}
-
-fn regex_time(g: &str) -> bool {
-    g.len() >= 5 && g.as_bytes()[2] == b':'
-}
-
-fn regex_dt(g: &str) -> bool {
-    g.contains('T') && (g.ends_with('Z') || g.contains('+') || g.rfind('-').map(|i| i > 10).unwrap_or(false))
 }
 
 fn strip_underscores(s: &str, n: usize) -> Result<String, Error> {
@@ -578,75 +410,577 @@ fn strip_underscores(s: &str, n: usize) -> Result<String, Error> {
     Ok(s.replace('_', ""))
 }
 
+fn hex_encode(bytes: &[u8]) -> String {
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        use std::fmt::Write;
+        write!(&mut s, "{:02x}", b).unwrap();
+    }
+    s
+}
+
+fn apply_tag(tag: &str, glyph: &str, n: usize) -> Result<Value, Error> {
+    match tag {
+        "s" => Ok(Value::String(glyph.to_string())),
+        "n" => parse_n(glyph, n),
+        "i" => parse_i(glyph, n),
+        "f" => parse_f(glyph, n),
+        "x" => {
+            let s = strip_underscores(glyph, n)?;
+            if s.is_empty() || !s.chars().all(|c| c.is_ascii_hexdigit()) {
+                return Err(err(n, "invalid hex"));
+            }
+            let val = i64::from_str_radix(&s, 16).map_err(|_| err(n, "invalid hex"))?;
+            Ok(Value::Int(val))
+        }
+        "xb" => {
+            let s = glyph.replace('_', "");
+            if s.is_empty() || s.len() % 2 != 0 || !s.chars().all(|c| c.is_ascii_hexdigit()) {
+                return Err(err(n, "hex bytes must be an even number of digits"));
+            }
+            let mut bytes = Vec::with_capacity(s.len() / 2);
+            for i in (0..s.len()).step_by(2) {
+                let byte = u8::from_str_radix(&s[i..i + 2], 16).map_err(|_| err(n, "invalid hex byte"))?;
+                bytes.push(byte);
+            }
+            Ok(Value::Bytes(bytes))
+        }
+        "o" => {
+            if glyph.is_empty() || !glyph.chars().all(|c| matches!(c, '0'..='7')) {
+                return Err(err(n, "invalid octal"));
+            }
+            let val = i64::from_str_radix(glyph, 8).map_err(|_| err(n, "invalid octal"))?;
+            Ok(Value::Int(val))
+        }
+        "b" => match glyph {
+            "true" => Ok(Value::Bool(true)),
+            "false" => Ok(Value::Bool(false)),
+            _ => Err(err(n, "boolean must be true or false")),
+        },
+        "d" => {
+            if !is_date(glyph) {
+                return Err(err(n, "invalid date"));
+            }
+            Ok(Value::Tagged(Tagged {
+                tag: "d".into(),
+                value: glyph.into(),
+            }))
+        }
+        "t" => {
+            if !is_time(glyph) {
+                return Err(err(n, "invalid time"));
+            }
+            Ok(Value::Tagged(Tagged {
+                tag: "t".into(),
+                value: glyph.into(),
+            }))
+        }
+        "dt" => {
+            if !is_datetime(glyph) {
+                return Err(err(n, "datetime must include a timezone offset"));
+            }
+            Ok(Value::Tagged(Tagged {
+                tag: "dt".into(),
+                value: glyph.into(),
+            }))
+        }
+        "tz" => {
+            if glyph != "Z" && glyph != "UTC" && !is_tz_offset(glyph) && !is_tz_name(glyph) {
+                return Err(err(n, "invalid time zone"));
+            }
+            Ok(Value::Tagged(Tagged {
+                tag: "tz".into(),
+                value: glyph.into(),
+            }))
+        }
+        "du" => {
+            if glyph.is_empty() || !is_duration(glyph) {
+                return Err(err(n, "invalid duration"));
+            }
+            Ok(Value::Tagged(Tagged {
+                tag: "du".into(),
+                value: glyph.into(),
+            }))
+        }
+        "sz" => {
+            if !is_data_size(glyph) {
+                return Err(err(n, "invalid data size"));
+            }
+            Ok(Value::Tagged(Tagged {
+                tag: "sz".into(),
+                value: glyph.into(),
+            }))
+        }
+        "unix" => parse_unix(glyph, n),
+        "ver" => {
+            if !is_version(glyph) {
+                return Err(err(n, "invalid version"));
+            }
+            Ok(Value::Tagged(Tagged {
+                tag: "ver".into(),
+                value: glyph.into(),
+            }))
+        }
+        "uuid" => {
+            if !is_uuid(glyph) {
+                return Err(err(n, "invalid uuid"));
+            }
+            Ok(Value::Tagged(Tagged {
+                tag: "uuid".into(),
+                value: glyph.into(),
+            }))
+        }
+        "ip" => {
+            if glyph.parse::<std::net::IpAddr>().is_err() {
+                return Err(err(n, "invalid ip"));
+            }
+            Ok(Value::Tagged(Tagged {
+                tag: "ip".into(),
+                value: glyph.into(),
+            }))
+        }
+        "b64" => {
+            let s: String = glyph.chars().filter(|c| !c.is_whitespace()).collect();
+            let bytes = base64_decode(&s).map_err(|_| err(n, "invalid base64"))?;
+            Ok(Value::Bytes(bytes))
+        }
+        "c" => {
+            if let Some(rest) = glyph.strip_prefix("U+") {
+                if (4..=6).contains(&rest.len()) && rest.chars().all(|c| c.is_ascii_hexdigit()) {
+                    let cp = u32::from_str_radix(rest, 16).map_err(|_| err(n, "invalid code point"))?;
+                    if cp > 0x10ffff {
+                        return Err(err(n, "invalid code point"));
+                    }
+                    if let Some(ch) = char::from_u32(cp) {
+                        return Ok(Value::Tagged(Tagged {
+                            tag: "c".into(),
+                            value: ch.to_string(),
+                        }));
+                    }
+                }
+                return Err(err(n, "invalid code point"));
+            }
+            if glyph.chars().count() != 1 {
+                return Err(err(n, "character must be a single scalar"));
+            }
+            Ok(Value::Tagged(Tagged {
+                tag: "c".into(),
+                value: glyph.into(),
+            }))
+        }
+        _ => Ok(Value::Tagged(Tagged {
+            tag: tag.into(),
+            value: glyph.into(),
+        })),
+    }
+}
+
 fn parse_n(g: &str, n: usize) -> Result<Value, Error> {
     let s = strip_underscores(g, n)?;
-    if s.contains('.') || s.contains('e') || s.contains('E') {
-        return s.parse::<f64>().map(Value::Float).map_err(|_| err(n, "invalid number"));
+    if has_leading_zero(&s) {
+        return Err(err(n, "leading zeros are not allowed"));
     }
-    s.parse::<i64>().map(Value::Int).map_err(|_| err(n, "invalid number"))
+    if let Ok(i) = s.parse::<i64>() {
+        return Ok(Value::Int(i));
+    }
+    if let Ok(f) = s.parse::<f64>() {
+        return Ok(Value::Float(f));
+    }
+    Err(err(n, "invalid number"))
 }
 
-fn parse_i(g: &str, n: usize) -> Result<i64, Error> {
+fn parse_i(g: &str, n: usize) -> Result<Value, Error> {
     let s = strip_underscores(g, n)?;
-    s.parse().map_err(|_| err(n, "invalid integer"))
+    if has_leading_zero(&s) {
+        return Err(err(n, "leading zeros are not allowed"));
+    }
+    s.parse::<i64>().map(Value::Int).map_err(|_| err(n, "invalid integer"))
 }
 
-fn parse_f(g: &str, n: usize) -> Result<f64, Error> {
+fn parse_f(g: &str, n: usize) -> Result<Value, Error> {
     let s = strip_underscores(g, n)?;
-    if !s.contains('.') && !s.contains('e') && !s.contains('E') {
+    if !s.contains('.') && !s.contains(['e', 'E']) {
         return Err(err(n, "float must contain '.' or 'e'"));
     }
-    s.parse().map_err(|_| err(n, "invalid float"))
+    s.parse::<f64>().map(Value::Float).map_err(|_| err(n, "invalid float"))
 }
 
 fn parse_unix(g: &str, n: usize) -> Result<Value, Error> {
     let s = strip_underscores(g, n)?;
-    if s.contains('.') {
-        s.parse::<f64>().map(Value::Float).map_err(|_| err(n, "invalid unix timestamp"))
-    } else {
-        s.parse::<i64>().map(Value::Int).map_err(|_| err(n, "invalid unix timestamp"))
+    if has_leading_zero(&s) {
+        return Err(err(n, "leading zeros are not allowed"));
+    }
+    if let Ok(i) = s.parse::<i64>() {
+        return Ok(Value::Int(i));
+    }
+    if let Ok(f) = s.parse::<f64>() {
+        return Ok(Value::Float(f));
+    }
+    Err(err(n, "invalid unix timestamp"))
+}
+
+fn has_leading_zero(s: &str) -> bool {
+    let rest = s.strip_prefix('-').unwrap_or(s);
+    rest.len() > 1 && rest.starts_with('0') && rest.chars().nth(1).unwrap().is_ascii_digit()
+}
+
+fn is_date(s: &str) -> bool {
+    let parts: Vec<&str> = s.split('-').collect();
+    parts.len() == 3
+        && parts[0].len() == 4
+        && parts[0].chars().all(|c| c.is_ascii_digit())
+        && parts[1].len() == 2
+        && parts[1].chars().all(|c| c.is_ascii_digit())
+        && parts[2].len() == 2
+        && parts[2].chars().all(|c| c.is_ascii_digit())
+}
+
+fn is_time(s: &str) -> bool {
+    let parts: Vec<&str> = s.split(':').collect();
+    if parts.len() < 2 || parts.len() > 3 {
+        return false;
+    }
+    if parts[0].len() != 2 || !parts[0].chars().all(|c| c.is_ascii_digit()) {
+        return false;
+    }
+    if parts[1].len() != 2 || !parts[1].chars().all(|c| c.is_ascii_digit()) {
+        return false;
+    }
+    if parts.len() == 3 {
+        let sec_parts: Vec<&str> = parts[2].split('.').collect();
+        if sec_parts[0].len() != 2 || !sec_parts[0].chars().all(|c| c.is_ascii_digit()) {
+            return false;
+        }
+        if sec_parts.len() == 2 && !sec_parts[1].chars().all(|c| c.is_ascii_digit()) {
+            return false;
+        }
+    }
+    true
+}
+
+fn is_datetime(s: &str) -> bool {
+    let Some((d, rest)) = s.split_once('T') else {
+        return false;
+    };
+    if !is_date(d) {
+        return false;
+    }
+    if let Some(t) = rest.strip_suffix('Z') {
+        return is_time(t);
+    }
+    if let Some(idx) = rest.rfind(|c| c == '+' || c == '-') {
+        let t = &rest[..idx];
+        let offset = &rest[idx..];
+        return is_time(t) && is_tz_offset(offset);
+    }
+    false
+}
+
+fn is_tz_offset(s: &str) -> bool {
+    let rest = s.strip_prefix('+').or_else(|| s.strip_prefix('-'));
+    let Some(r) = rest else { return false };
+    let parts: Vec<&str> = r.split(':').collect();
+    parts.len() == 2
+        && parts[0].len() == 2
+        && parts[0].chars().all(|c| c.is_ascii_digit())
+        && parts[1].len() == 2
+        && parts[1].chars().all(|c| c.is_ascii_digit())
+}
+
+fn is_tz_name(s: &str) -> bool {
+    let parts: Vec<&str> = s.split('/').collect();
+    parts.len() >= 2
+        && parts.iter().all(|p| {
+            !p.is_empty()
+                && p.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '+' || c == '-')
+        })
+}
+
+fn is_duration(s: &str) -> bool {
+    let mut rest = s;
+    for unit in ['d', 'h', 'm'] {
+        if let Some(idx) = rest.find(unit) {
+            let num = &rest[..idx];
+            if num.is_empty() || !num.chars().all(|c| c.is_ascii_digit()) {
+                return false;
+            }
+            rest = &rest[idx + 1..];
+        }
+    }
+    if !rest.is_empty() {
+        let Some(num) = rest.strip_suffix('s') else {
+            return false;
+        };
+        if num.is_empty() {
+            return false;
+        }
+        let parts: Vec<&str> = num.split('.').collect();
+        if parts.len() > 2 {
+            return false;
+        }
+        if !parts[0].chars().all(|c| c.is_ascii_digit()) {
+            return false;
+        }
+        if parts.len() == 2 && !parts[1].chars().all(|c| c.is_ascii_digit()) {
+            return false;
+        }
+    }
+    true
+}
+
+fn is_data_size(s: &str) -> bool {
+    let units = ["PiB", "TiB", "GiB", "MiB", "KiB", "PB", "TB", "GB", "MB", "KB", "B"];
+    for u in units {
+        if let Some(num) = s.strip_suffix(u) {
+            if num.is_empty() {
+                return false;
+            }
+            let parts: Vec<&str> = num.split('.').collect();
+            if parts.len() > 2 {
+                return false;
+            }
+            if !parts[0].chars().all(|c| c.is_ascii_digit()) {
+                return false;
+            }
+            if parts.len() == 2 && !parts[1].chars().all(|c| c.is_ascii_digit()) {
+                return false;
+            }
+            return true;
+        }
+    }
+    false
+}
+
+fn is_version(s: &str) -> bool {
+    let parts: Vec<&str> = s.split('.').collect();
+    !parts.is_empty() && parts.iter().all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()))
+}
+
+fn is_uuid(s: &str) -> bool {
+    let parts: Vec<&str> = s.split('-').collect();
+    parts.len() == 5
+        && parts[0].len() == 8
+        && parts[1].len() == 4
+        && parts[2].len() == 4
+        && parts[3].len() == 4
+        && parts[4].len() == 12
+        && parts.iter().all(|p| p.chars().all(|c| c.is_ascii_hexdigit()))
+}
+
+fn base64_decode(input: &str) -> Result<Vec<u8>, ()> {
+    const T: [i8; 256] = {
+        let mut t = [-1i8; 256];
+        let mut i = 0usize;
+        while i < 26 {
+            t[b'A' as usize + i] = i as i8;
+            t[b'a' as usize + i] = (i + 26) as i8;
+            i += 1;
+        }
+        let mut i = 0usize;
+        while i < 10 {
+            t[b'0' as usize + i] = (i + 52) as i8;
+            i += 1;
+        }
+        t[b'+' as usize] = 62;
+        t[b'/' as usize] = 63;
+        t
+    };
+    let mut buf = 0u32;
+    let mut bits = 0u32;
+    let mut out = Vec::new();
+    for &b in input.as_bytes() {
+        if b == b'=' {
+            break;
+        }
+        let val = T[b as usize];
+        if val < 0 {
+            return Err(());
+        }
+        buf = (buf << 6) | (val as u32);
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((buf >> bits) as u8);
+            buf &= (1 << bits) - 1;
+        }
+    }
+    Ok(out)
+}
+
+// --- Encoder ---
+
+pub fn encode(value: &Value) -> Result<String, Error> {
+    match value {
+        Value::Dict(pairs) => {
+            if pairs.is_empty() {
+                return Ok(String::new());
+            }
+            let mut lines = Vec::new();
+            encode_dict(pairs, 0, &mut lines)?;
+            Ok(lines.join("\n") + "\n")
+        }
+        _ => Err(err(0, "root must be a dictionary")),
     }
 }
 
-fn b64_decode(s: &str) -> Option<Vec<u8>> {
-    fn val(c: u8) -> Option<u8> {
-        match c {
-            b'A'..=b'Z' => Some(c - b'A'),
-            b'a'..=b'z' => Some(c - b'a' + 26),
-            b'0'..=b'9' => Some(c - b'0' + 52),
-            b'+' => Some(62),
-            b'/' => Some(63),
-            _ => None,
-        }
+pub fn to_string(value: &Value) -> Result<String, Error> {
+    encode(value)
+}
+
+fn validate_key(k: &str) -> Result<(), Error> {
+    if k.is_empty() {
+        return Err(err(0, "key cannot be empty"));
     }
-    if s.len() % 4 != 0 {
-        return None;
+    if k.contains(['\n', '\r']) || k.contains(": ") || k.ends_with(':') {
+        return Err(err(0, format!("invalid key format: {k}")));
     }
-    let bytes = s.as_bytes();
-    let mut out = Vec::new();
-    let mut i = 0;
-    while i < bytes.len() {
-        let pad2 = bytes[i + 2] == b'=';
-        let pad3 = bytes[i + 3] == b'=';
-        let a = val(bytes[i])?;
-        let b = val(bytes[i + 1])?;
-        out.push((a << 2) | (b >> 4));
-        if !pad2 {
-            let c = val(bytes[i + 2])?;
-            out.push(((b & 0xf) << 4) | (c >> 2));
-            if !pad3 {
-                let d = val(bytes[i + 3])?;
-                out.push(((c & 0x3) << 6) | d);
+    Ok(())
+}
+
+fn encode_dict(pairs: &[(String, Value)], depth: usize, lines: &mut Vec<String>) -> Result<(), Error> {
+    if depth > 64 {
+        return Err(err(0, "nesting depth exceeds limit"));
+    }
+    let indent = "  ".repeat(depth);
+    for (k, v) in pairs {
+        validate_key(k)?;
+        match v {
+            Value::Dict(sub) => {
+                if sub.is_empty() {
+                    lines.push(format!("{indent}{k}: {{}}"));
+                } else {
+                    lines.push(format!("{indent}{k}:"));
+                    encode_dict(sub, depth + 1, lines)?;
+                }
+            }
+            Value::List(sub) => {
+                if sub.is_empty() {
+                    lines.push(format!("{indent}{k}: []"));
+                } else {
+                    lines.push(format!("{indent}{k}:"));
+                    encode_list(sub, depth + 1, lines)?;
+                }
+            }
+            Value::String(s) => {
+                if s.contains(['\n', '\r']) {
+                    lines.push(format!("{indent}{k}: |"));
+                    for line in s.lines() {
+                        lines.push(format!("{indent}  {line}"));
+                    }
+                    lines.push(format!("{indent}|"));
+                } else if s.is_empty() {
+                    lines.push(format!("{indent}{k}:"));
+                } else if s.starts_with('!') || s == "[]" || s == "{}" || s.starts_with('|') {
+                    lines.push(format!("{indent}{k}: !s {s}"));
+                } else {
+                    lines.push(format!("{indent}{k}: {s}"));
+                }
+            }
+            Value::Int(i) => {
+                lines.push(format!("{indent}{k}: !i {i}"));
+            }
+            Value::Float(f) => {
+                let mut s = f.to_string();
+                if !s.contains('.') && !s.contains(['e', 'E']) {
+                    s.push_str(".0");
+                }
+                lines.push(format!("{indent}{k}: !f {s}"));
+            }
+            Value::Bool(b) => {
+                lines.push(format!("{indent}{k}: !b {}", if *b { "true" } else { "false" }));
+            }
+            Value::Bytes(b) => {
+                lines.push(format!("{indent}{k}: !xb {}", hex_encode(b).to_uppercase()));
+            }
+            Value::Tagged(t) => {
+                if t.value.contains(['\n', '\r']) {
+                    lines.push(format!("{indent}{k}: !{} |", t.tag));
+                    for line in t.value.lines() {
+                        lines.push(format!("{indent}  {line}"));
+                    }
+                    lines.push(format!("{indent}|"));
+                } else {
+                    lines.push(format!("{indent}{k}: !{} {}", t.tag, t.value));
+                }
             }
         }
-        i += 4;
     }
-    Some(out)
+    Ok(())
 }
 
-#[cfg(test)]
-fn dict_get<'a>(d: &'a Value, key: &str) -> Option<&'a Value> {
-    match d {
+fn encode_list(items: &[Value], depth: usize, lines: &mut Vec<String>) -> Result<(), Error> {
+    if depth > 64 {
+        return Err(err(0, "nesting depth exceeds limit"));
+    }
+    let indent = "  ".repeat(depth);
+    for v in items {
+        match v {
+            Value::Dict(sub) => {
+                if sub.is_empty() {
+                    lines.push(format!("{indent}- {{}}"));
+                } else {
+                    lines.push(format!("{indent}-"));
+                    encode_dict(sub, depth + 1, lines)?;
+                }
+            }
+            Value::List(sub) => {
+                if sub.is_empty() {
+                    lines.push(format!("{indent}- []"));
+                } else {
+                    lines.push(format!("{indent}-"));
+                    encode_list(sub, depth + 1, lines)?;
+                }
+            }
+            Value::String(s) => {
+                if s.contains(['\n', '\r']) {
+                    lines.push(format!("{indent}- |"));
+                    for line in s.lines() {
+                        lines.push(format!("{indent}  {line}"));
+                    }
+                    lines.push(format!("{indent}|"));
+                } else if s.is_empty() {
+                    lines.push(format!("{indent}-"));
+                } else if s.starts_with('!') || s == "[]" || s == "{}" || s.starts_with('|') {
+                    lines.push(format!("{indent}- !s {s}"));
+                } else {
+                    lines.push(format!("{indent}- {s}"));
+                }
+            }
+            Value::Int(i) => {
+                lines.push(format!("{indent}- !i {i}"));
+            }
+            Value::Float(f) => {
+                let mut s = f.to_string();
+                if !s.contains('.') && !s.contains(['e', 'E']) {
+                    s.push_str(".0");
+                }
+                lines.push(format!("{indent}- !f {s}"));
+            }
+            Value::Bool(b) => {
+                lines.push(format!("{indent}- !b {}", if *b { "true" } else { "false" }));
+            }
+            Value::Bytes(b) => {
+                lines.push(format!("{indent}- !xb {}", hex_encode(b).to_uppercase()));
+            }
+            Value::Tagged(t) => {
+                if t.value.contains(['\n', '\r']) {
+                    lines.push(format!("{indent}- !{} |", t.tag));
+                    for line in t.value.lines() {
+                        lines.push(format!("{indent}  {line}"));
+                    }
+                    lines.push(format!("{indent}|"));
+                } else {
+                    lines.push(format!("{indent}- !{} {}", t.tag, t.value));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+pub fn dict_get<'a>(v: &'a Value, key: &str) -> Option<&'a Value> {
+    match v {
         Value::Dict(pairs) => pairs.iter().find(|(k, _)| k == key).map(|(_, v)| v),
         _ => None,
     }
@@ -655,16 +989,14 @@ fn dict_get<'a>(d: &'a Value, key: &str) -> Option<&'a Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
 
-    fn example() -> String {
-        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../testdata/example.xun");
-        fs::read_to_string(path).unwrap()
+    fn example() -> &'static str {
+        include_str!("../../testdata/example.xun")
     }
 
     #[test]
     fn readme_example() {
-        let doc = parse(&example()).expect("parse");
+        let doc = parse(example()).expect("parse");
         assert_eq!(dict_get(&doc, "endpoint"), Some(&Value::String("https://api.example.com/v2/orders".into())));
         let server = dict_get(&doc, "server").unwrap();
         assert_eq!(dict_get(server, "port"), Some(&Value::Int(8080)));
@@ -692,5 +1024,55 @@ mod tests {
     fn untyped() {
         let doc = parse("a: 8080\n").unwrap();
         assert_eq!(dict_get(&doc, "a"), Some(&Value::String("8080".into())));
+    }
+
+    #[test]
+    fn encode_and_roundtrip() {
+        let doc = Value::Dict(vec![
+            ("server".into(), Value::Dict(vec![
+                ("host".into(), Value::String("localhost".into())),
+                ("port".into(), Value::Int(8080)),
+            ])),
+            ("empty_dict".into(), Value::Dict(vec![])),
+            ("empty_list".into(), Value::List(vec![])),
+            ("features".into(), Value::List(vec![
+                Value::String("auth".into()),
+                Value::String("cache".into()),
+            ])),
+            ("banner".into(), Value::String("Welcome\nto XUN".into())),
+            ("flag".into(), Value::Bool(true)),
+            ("color".into(), Value::Bytes(vec![0xde, 0xad, 0xbe, 0xef])),
+            ("py".into(), Value::Tagged(Tagged {
+                tag: "ver".into(),
+                value: "3.10".into(),
+            })),
+        ]);
+
+        let text = encode(&doc).unwrap();
+        let parsed = parse(&text).unwrap();
+        assert_eq!(doc, parsed);
+    }
+
+    #[test]
+    fn file_write_and_read() {
+        let doc = Value::Dict(vec![
+            ("app".into(), Value::String("rust-xun".into())),
+            ("version".into(), Value::Tagged(Tagged { tag: "ver".into(), value: "0.1.1".into() })),
+            ("count".into(), Value::Int(100)),
+            ("rate".into(), Value::Float(99.5)),
+            ("enabled".into(), Value::Bool(true)),
+            ("raw".into(), Value::Bytes(vec![0x01, 0x02, 0x03])),
+            ("text".into(), Value::String("Line 1\nLine 2".into())),
+        ]);
+
+        let tmp_path = std::env::temp_dir().join("test_rust.xun");
+        let encoded = encode(&doc).unwrap();
+        std::fs::write(&tmp_path, encoded).unwrap();
+
+        let read_str = std::fs::read_to_string(&tmp_path).unwrap();
+        let parsed = parse(&read_str).unwrap();
+        assert_eq!(doc, parsed);
+
+        let _ = std::fs::remove_file(tmp_path);
     }
 }

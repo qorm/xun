@@ -1,22 +1,22 @@
 # XUN
 
-XUN (pronounced “shün”, like Chinese 讯) is a configuration notation for humans and machines: unquoted by default, types marked with `!tag`, and exactly two spaces per indent level. The name stands for **X Unquoted Notation**.
+[English](README.en.md) · [中文](README.md)
+
+XUN (pronounced “shün”, like Chinese 讯) is a modern configuration notation designed for human readability and unambiguous machine parsing: **unquoted by default**, **types explicitly tagged (`!tag`)**, and **strict 2-space indentation per level**. The name stands for **X Unquoted Notation**.
 
 - File extension: `.xun`
 - Media type: `text/xun`
-- Language id: `xun`
+- Language identifier: `xun`
 
-[English](README.en.md) · [中文](README.md)
+Compared with JSON: eliminates repetitive quotes, supports comments, and provides clean native multiline blocks.  
+Compared with YAML: never guesses types (`3.10` is never coerced into float `3.1`, `yes`/`NO` are strictly strings), multiline blocks must be explicitly closed, with no implicit typing pitfalls.  
+Compared with TOML: deep nesting relies naturally on indentation without repeating long table headers `[a.b.c.d]`.
 
-Compared with JSON: fewer quotes, comments, and real multiline text. Compared with YAML: no implicit typing (`3.10` stays `3.10`), and multiline blocks must be closed. Compared with TOML: nesting is indentation, not repeated table paths.
+---
 
 ## Example
 
 ```xun
-$api: https://api.example.com/v2
-$ports: !n[80, 443, 8080]
-$zone: !tz Asia/Shanghai
-
 server:
   host: localhost
   port: !n 8080
@@ -29,9 +29,9 @@ features:
   - auth
   - cache
 
-ports: $ports
-endpoint: ${api}/orders
-tz: $zone
+ports: !n[80, 443, 8080]
+endpoint: https://api.example.com/v2/orders
+tz: !tz Asia/Shanghai
 py: !ver 3.10
 limit: !sz 10MiB
 when: !dt 2026-08-14T16:54:00+08:00
@@ -47,240 +47,245 @@ banner: |
 |
 ```
 
-## File
+---
 
-The entire file must be UTF-8. Invalid bytes and `NUL` (U+0000) are hard errors; they are never replaced with U+FFFD.
+## Core Specification
 
-- BOM: allowed only at the start of the file; stripped on read
-- Newlines: LF, CRLF, and CR each count as one line; normalized to LF
-- Indent: ASCII space U+0020 only, exactly 2 per level. Tab, skipped levels, and odd counts are errors
-- The root must be a dictionary. An empty file or comments-only file is `{}`
-- No file includes
+### 1. File and Encoding
+- **UTF-8 Only**: The entire file must be valid UTF-8. Invalid byte sequences or `NUL` (U+0000) trigger an immediate fatal parse error.
+- **BOM**: Permitted only at the beginning of the file (U+FEFF); stripped on read.
+- **Newlines**: LF (`\n`), CRLF (`\r\n`), and CR (`\r`) are recognized and normalized to LF internally.
+- **Strict Indentation**: ASCII space (U+0020) only, **exactly 2 spaces per indentation level**. Tabs, skipped levels, and odd indentation counts are errors.
+- **Root Node**: **Must be a dictionary**. An empty file or a comments-only file evaluates to `{}`.
 
-## Structure
+### 2. Structure and Containers
+XUN has three kinds of nodes: **Dictionary**, **List**, and **Scalar**.
 
-Three node kinds: dictionary, list, scalar.
-
-```xun
-# dictionary: colon plus space, or a colon at end of line
-host: localhost
-tls:
-  cert: /etc/ssl/cert.pem
-
-# list
-features:
-  - auth
-  - cache
-
-# empty containers must be written out
-plugins: []
-meta: {}
-```
-
-The separator must be `: ` or a trailing `:`. A line like `key:value` (no space after the colon) is illegal.
-
-A single container cannot mix `-` items and `key:` items. It is entirely a dict or entirely a list.
-
-A key runs up to the first `: `. Keys may contain non-ASCII, must be non-empty, and must not contain `: `. Duplicate keys are an error (not last-wins). Keys, tags, and `true` / `false` are case-sensitive. Parse order of keys is preserved.
-
-Trailing whitespace is stripped on structure lines and kept in multiline bodies.
-
-## Types
-
-A value with no `!tag` is a string. Nothing is guessed: `8080`, `true`, `NO`, and `3.10` are all strings. Put the tag in front of the value when you need a type.
-
-| tag | Meaning | Valid form | Invalid |
-| --- | --- | --- | --- |
-| (none) / `!s` | string | rest of the line, literally. `!s` when the value starts with `!` or `$` | — |
-| `!n` | number | integer if no `.` / `e`, otherwise float | leading zeros, `abc` |
-| `!i` | integer | `8080` `-3` `1_000` | `1.5`, i64 overflow |
-| `!f` | float | must contain `.` or `e`: `1.5` `1e-3` `8080.0` | `!f 8080` |
-| `!x` | hex **integer** | `DEAD_BEEF` (leading zeros do not change the value) | empty, non-hex |
-| `!xb` | hex **bytes** | `FF00AA` (even length; leading zeros kept) | odd length |
-| `!o` | octal (file mode) | `755` `0644` | digits 8 or 9 |
-| `!b` | boolean | `true` / `false` only | `yes` `ON` `1` |
-| `!d` | date | `YYYY-MM-DD` | `08/14/2026` |
-| `!t` | time | `HH:MM` or `HH:MM:SS` | `4pm` |
-| `!dt` | date-time | must include `Z` or `±HH:MM` | missing offset |
-| `!tz` | time zone | IANA name, or `Z` / `+08:00` | `CST` |
-| `!du` | duration | `1d2h30m15s` | `90 minutes`; bare `10m` as mebibytes |
-| `!sz` | data size | `10MiB` `3KB` `1024B` | `10m` (that is duration) |
-| `!unix` | Unix epoch seconds | `1692000000` or with a fraction | leading zeros |
-| `!ver` | version | `3.10` stored by segment, not as a float | `3.10.beta` |
-| `!uuid` | UUID | `8-4-4-4-12`, hyphens required | missing hyphens |
-| `!ip` | IP | `127.0.0.1` or `::1`, no port | `127.0.0.1:80` |
-| `!b64` | Base64 | `SGVsbG8=` or `!b64 \| … \|` | illegal alphabet |
-| `!c` | character | one Unicode scalar on the same line, or `U+000A` | multiline, `ab` |
-
-Unknown tags (`!sql`, `!md`, `!json`) are legal: the parser keeps the tag and the raw glyph for the application.
-
-There is no `null`. Absence means omit the key. An empty string is `key:` with no subtree.
-
-## Arrays
-
-The element type is marked on the array. Compact form is allowed when elements cannot contain commas. String arrays must use `-` items.
+- **Dictionary Pairs**: Separator must be `: ` (colon followed by a space) or a trailing `:` at the end of the line.
+  - `key: value` (valid)
+  - `key:value` (**invalid**, missing space after colon)
+  - Keys cannot be empty, cannot contain newlines, and cannot contain `: `. Duplicate keys in the same container are fatal errors.
+- **List Items**: Start with `- ` or a standalone `-`.
+- **Container Exclusivity**: A container cannot mix `-` list items and `key:` dictionary pairs at the same level.
+- **Explicit Empty Containers**: Empty dictionary is `{}`; empty list is `[]`.
 
 ```xun
-ports: !n[80, 443, 8080]
-vowels: !c[a, e, i]
-peers: !ip[127.0.0.1, ::1]
-py: !ver[3.10, 3.11]
+# Nested dictionary
+database:
+  host: 127.0.0.1
+  port: !n 5432
 
-roles: !s[]
-  - admin
-  - ops
-  - a, b is still one string
+# List
+users:
+  - alice
+  - bob
 
-ports: !n[]
-  - 80
-  - 443
+# Empty containers
+empty_map: {}
+empty_list: []
 ```
 
-- `[]` is an empty, untyped list
-- `!n[]` with no children is an empty number array
-- A `-` list with no array tag defaults to strings; a single item may still carry `!n`
+### 3. Explicit Type System
 
-## Multiline
+**Any scalar without an explicit `!tag` is strictly a string. Parsers never guess.**  
+Values like `8080`, `true`, `false`, `NO`, and `3.10` are all strings unless prefixed with a tag.
 
-Closing a block by indent alone is ambiguous (blank lines; a forgotten indent becomes the next key). XUN enters body mode and restores structure only when it sees the closer.
+| Tag | Meaning | Valid Form Examples | Invalid Examples / Notes |
+| :--- | :--- | :--- | :--- |
+| (none) / `!s` | String | `hello world`, `!s !special` | `!s` used when value starts with `!` |
+| `!n` | Number (general) | `8080`, `-12`, `3.14`, `1e-3` | `012` (no leading zeros), `1_000` (underscores allowed) |
+| `!i` | Integer | `8080`, `-3`, `1_000` | `1.5`, out-of-range i64 |
+| `!f` | Float | Must contain `.` or `e`: `1.5`, `8080.0`, `1e3` | `!f 8080` (missing dot or exponent) |
+| `!x` | Hex Integer | `DEAD_BEEF`, `0xFF` | Non-hex characters |
+| `!xb` | Hex Bytes | `FF00AA` (must be even length) | `F0A` (odd length is illegal) |
+| `!o` | Octal (file mode) | `755`, `0644` | Digits `8` or `9` |
+| `!b` | Boolean | `true` or `false` only | `yes`, `1`, `True`, `ON` |
+| `!d` | Date | `2026-08-14` (`YYYY-MM-DD`) | `2026/08/14` |
+| `!t` | Time | `16:54`, `16:54:00`, `16:54:00.123` | `4pm` |
+| `!dt` | Date-Time with TZ | `2026-08-14T16:54:00+08:00`, `...Z` | Missing timezone offset |
+| `!tz` | Timezone | IANA name (`Asia/Shanghai`), `Z`, `+08:00` | `CST` (ambiguous abbreviation) |
+| `!du` | Duration | `1d2h30m15s`, `500ms`, `10s` | `90 minutes` |
+| `!sz` | Data Size | `10MiB`, `3KB`, `1024B` | `10m` |
+| `!unix` | Unix Epoch Seconds | `1692000000` | Leading zeros |
+| `!ver` | Semantic Version | `3.10` (stored by segment, not float), `1.2.3` | `3.10.beta` |
+| `!uuid` | UUID | `8-4-4-4-12` format with hyphens | Missing hyphens |
+| `!ip` | IP Address | IPv4 `127.0.0.1`, IPv6 `::1` | With port (e.g. `127.0.0.1:80`) |
+| `!b64` | Base64 Bytes | `SGVsbG8=` | Illegal Base64 characters |
+| `!c` | Single Unicode Character | Single scalar `a` or codepoint `U+000A` | Multiple scalars `ab` |
+
+- **Unknown Tags**: Tags like `!sql`, `!md`, `!custom` are valid. The parser preserves the tag name and raw text for upstream applications.
+- **No `null`**: Absence of a key represents missing value. An empty string is written as `key:` with no trailing subtree.
+
+### 4. Arrays (Compact and Block Form)
+
+- **Compact Array**: The type tag is placed directly on the brackets `!tag[...]`, with elements separated by commas (elements cannot contain commas).
+  ```xun
+  ports: !n[80, 443, 8080]
+  vowels: !c[a, e, i]
+  peers: !ip[127.0.0.1, ::1]
+  py_versions: !ver[3.10, 3.11]
+  ```
+- **Block Form Array**:
+  - String arrays **must** use block form (to avoid comma splitting ambiguity):
+    ```xun
+    roles: !s[]
+      - admin
+      - ops
+      - hello, world
+    ```
+  - Standard untyped list:
+    ```xun
+    items:
+      - item1
+      - item2
+    ```
+
+### 5. Multiline Blocks
+
+XUN uses explicit delimiters to terminate multiline blocks, avoiding indentation ambiguity:
 
 ```xun
 banner: |
-  Hello
-
-  World
+  Line 1
+  Line 2
 |
-next: x
 
 query: !sql |
-  SELECT
-    id,
-    name
+  SELECT id, name
   FROM users
+  WHERE active = true
 |
 ```
 
-- Open: the value slot is `|` or `!tag |`
-- Close: same indent as the opener, and the line is exactly `|` after stripping spaces
-- Each body line is indented 2 more spaces; those 2 are stripped; extra spaces stay in the value
-- Inside the body, `#`, `:`, `-`, `!`, and `$` are literal; variables are not expanded
-- Missing closer at EOF is an error; the parser does not guess
-- No trailing newline by default; keep a blank line before `|` if you need one
+- **Open**: Value slot has `|` or `!tag |` (or custom closing tag like `|MD`).
+- **Close**: On a line with the **same indentation** as the opening key, write `|` (or the corresponding tag like `MD`).
+- **Body Indent**: Each line of the body is indented 2 spaces beyond the opening key; these 2 baseline spaces are stripped during parsing.
+- **Literal Contents**: All characters inside the multiline body (including `#`, `:`, `-`, `!`) are preserved literally.
 
-If the body itself may contain a line that is just `|`, tag the opener:
+---
 
-```xun
-table: |MD
-  | a | b |
-  |---|---|
-MD
-```
+## AI & Developer Authoring Guidelines (Do's & Don'ts)
 
-`TAG` is `[A-Za-z_][A-Za-z0-9_]*`.
+Follow these rules to ensure 100% compliant XUN generation:
 
-## Variable section
+### Golden Rules Checklist
+1. **Strict 2-Space Indent**: Never use tabs; indent exactly 2 spaces per level.
+2. **Colon Followed by Space**: Write `key: value`, never `key:value`.
+3. **No Quotes by Default**: Do not wrap strings in `"` or `'`. Writing `name: "Alice"` will keep the quotes as part of the string value.
+4. **Explicit Type Tags**: Use `!n 8080` / `!i 8080` for numbers, `!b true` for booleans; otherwise they remain strings.
+5. **Always Close Multiline Blocks**: Every multiline block starting with `|` must end with `|` at the matching indentation level.
+6. **Explicit Empty Containers**: Write `{}` for empty dictionaries, `[]` for empty lists.
+7. **No Null**: Omit the key entirely or use `key:` for an empty string.
 
-The file starts with a variable section. A line beginning with `$` is a definition. The first line that is not `$`, a comment, or blank ends the section and is the first document line. `$foo:` in the document is an error.
+### Pattern Comparison (Do's & Don'ts)
 
-```xun
-$api: https://api.example.com/v2
-$port: !n 8080
-# a normal comment in the variable section
+| Scenario | ❌ Incorrect | ✅ Correct | Reason |
+| :--- | :--- | :--- | :--- |
+| **Colon space** | `port:8080` | `port: !n 8080` | Space required after `:` |
+| **String quotes** | `name: "Alice"` | `name: Alice` | Quotes are preserved as literal characters |
+| **Numeric value** | `count: 10` (wants integer) | `count: !i 10` or `!n 10` | Untagged scalar is parsed as string `"10"` |
+| **Boolean value** | `enabled: true` (wants bool) | `enabled: !b true` | Untagged `true` is parsed as string `"true"` |
+| **Float value** | `rate: !f 100` | `rate: !f 100.0` | `!f` requires a dot `.` or exponent `e` |
+| **String array** | `tags: !s[a, b]` | `tags: !s[]`<br>`  - a`<br>`  - b` | String arrays cannot use compact comma form |
+| **Multiline body** | `desc: \|`<br>`  hello` (unclosed) | `desc: \|`<br>`  hello`<br>`\|` | Multiline block must have matching closing `\|` |
+| **Empty dict** | `meta:` (empty subtree) | `meta: {}` | Empty dict must be written `{}` explicitly |
 
-base: $api
-users: ${api}/users
-port: $port
-literal: !s $api
-```
+---
 
-- `$name`: replace the whole value, type included
-- `${name}`: interpolate in single-line strings only
-- No interpolation inside `|…|` bodies
-- Define before use; duplicates, undefined names, and cycles are errors
-- Variables are not part of the output tree; they exist only until expansion
+## Official Libraries & API
 
-## Comments
+Standard implementations are provided for 6 major languages, each with complete **Decoders (`parse`)** and **Encoders (`encode`)**, verified with bidirectional round-trip test suites.
 
-`#` at the start of a structure line is a comment. No end-of-line comments (`#` after a value is content). `#` inside a multiline body is content.
+| Language | Package / Path | Decode | Encode | Installation / Usage |
+| :--- | :--- | :--- | :--- | :--- |
+| **JavaScript** | [`@qorm/xun`](javascript/) | `parse(str)` | `encode(obj)` / `stringify(obj)` | `npm install @qorm/xun` |
+| **Python** | [`xun-format`](python/) | `parse(str)` | `encode(dict)` / `dump(dict, fp)` / `dumps(dict)` | `pip install git+https://github.com/qorm/xun.git#subdirectory=python` |
+| **Go** | [`github.com/qorm/xun/go`](go/) | `xun.Parse(str)` | `xun.Encode(v)` / `xun.Marshal(v)` | `go get github.com/qorm/xun/go` |
+| **Rust** | [`xun`](rust/) | `xun::parse(&str)` | `xun::encode(&val)` / `xun::to_string(&val)` | `xun = { git = "https://github.com/qorm/xun", subdirectory = "rust" }` |
+| **Java** | [`io.github.qorm.xun`](java/) | `Xun.parse(str)` | `Xun.encode(map)` / `Xun.dump(map)` | Add `java/src` to source path |
+| **C** | [`c/`](c/) | `xun_parse` / `xun_parse_file` | `xun_encode` / `xun_encode_file` | Compile `xun.h` / `xun.c` |
 
-## Parsing
+### Code Examples
 
-1. Decode UTF-8; stop on failure
-2. Split lines; read the variable section into an environment
-3. Parse the document with an indent stack; `|` enters body mode until the matching closer
-4. Expand `$name` / `${name}` on scalars
-5. Bad indent, missing closer, duplicate keys, and illegal glyphs are hard errors; they are never repaired into the next field
-
-Implementations must set limits. At least 64 nesting levels and 1MB files are recommended, to reject hostile input.
-
-## Explicitly out of scope
-
-- Implicit types (`yes` / `NO` / the Norway problem)
-- Dotted paths `a.b.c`, YAML anchors `&*`, multi-documents `---`
-- Untyped inline `[a, b]` (commas force quoting)
-- `inf` / `nan`, `null`
-- File includes
-- `enum`, secrets, sets, and ranges `1..10` in the syntax (those belong to a schema)
-
-`!url`, `!email`, `!re`, `!cron`, and similar stay unknown tags, not core.
-
-## Parsers
-
-This repository ships six implementations that share [`testdata/`](testdata/). The entry point is `parse(source)`: `source` is the full XUN text (UTF-8), and the root is a dictionary. Special types such as `!d` / `!ip` come back as tagged values; `!xb` / `!b64` are bytes. C also provides `xun_parse_file`.
-
-| Language | Package | Install |
-|---|---|---|
-| JavaScript | [`@qorm/xun`](https://www.npmjs.com/package/@qorm/xun) | `npm install @qorm/xun` |
-| Python | [`xun-format`](python/) (`import xun`) | `pip install git+https://github.com/qorm/xun.git#subdirectory=python` |
-| Go | [`github.com/qorm/xun/go`](go/) | `go get github.com/qorm/xun/go` |
-| Rust | [`xun`](rust/) | `xun = { git = "https://github.com/qorm/xun", subdirectory = "rust" }` |
-| Java | [`io.github.qorm.xun`](java/) | add `java/src` to your source path |
-| C | [`c/`](c/) | compile `xun.h` / `xun.c` into your project |
-
-To load a file, read it as UTF-8 and pass the string to the parser:
-
+#### JavaScript / TypeScript
 ```js
-import { readFileSync } from "node:fs";
-import { parse } from "@qorm/xun";
+import { parse, encode } from "@qorm/xun";
+import { readFileSync, writeFileSync } from "node:fs";
 
+// Decode
 const doc = parse(readFileSync("config.xun", "utf8"));
+console.log(doc.server.port); // 8080
+
+// Encode
+const output = encode(doc);
+writeFileSync("output.xun", output, "utf8");
 ```
 
+#### Python
 ```python
 from pathlib import Path
-from xun import parse
+from xun import parse, encode
 
+# Decode
 doc = parse(Path("config.xun").read_text(encoding="utf-8"))
+print(doc["server"]["port"])
+
+# Encode
+text = encode(doc)
+Path("output.xun").write_text(text, encoding="utf-8")
 ```
 
+#### Go
 ```go
 package main
 
 import (
-    "log"
-    "os"
+	"fmt"
+	"log"
+	"os"
 
-    "github.com/qorm/xun/go"
+	"github.com/qorm/xun/go"
 )
 
 func main() {
-    b, err := os.ReadFile("config.xun")
-    if err != nil {
-        log.Fatal(err)
-    }
-    doc, err := xun.Parse(string(b))
-    if err != nil {
-        log.Fatal(err)
-    }
-    _ = doc
+	b, err := os.ReadFile("config.xun")
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	// Decode
+	doc, err := xun.Parse(string(b))
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	// Encode
+	encoded, err := xun.Encode(doc)
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Println(encoded)
 }
 ```
 
+#### Rust
 ```rust
-let src = std::fs::read_to_string("config.xun")?;
-let doc = xun::parse(&src)?;
+use xun::{parse, encode};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let src = std::fs::read_to_string("config.xun")?;
+    
+    // Decode
+    let doc = parse(&src)?;
+    
+    // Encode
+    let text = encode(&doc)?;
+    println!("{}", text);
+    Ok(())
+}
 ```
 
+#### Java
 ```java
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -288,24 +293,56 @@ import java.nio.file.Path;
 import java.util.Map;
 import io.github.qorm.xun.Xun;
 
-Map<String, Object> doc = Xun.parse(
-    Files.readString(Path.of("config.xun"), StandardCharsets.UTF_8));
+public class Main {
+    public static void main(String[] args) throws Exception {
+        String src = Files.readString(Path.of("config.xun"), StandardCharsets.UTF_8);
+        
+        // Decode
+        Map<String, Object> doc = Xun.parse(src);
+        
+        // Encode
+        String text = Xun.encode(doc);
+        System.out.println(text);
+    }
+}
 ```
 
+#### C
 ```c
+#include <stdio.h>
+#include <stdlib.h>
 #include "xun.h"
 
-xun_value *doc = NULL;
-xun_error err;
-if (xun_parse_file("config.xun", &doc, &err) != 0) {
-    fprintf(stderr, "line %d: %s\n", err.line, err.message);
-    return 1;
+int main(void) {
+    xun_value *doc = NULL;
+    xun_error err;
+
+    // Decode
+    if (xun_parse_file("config.xun", &doc, &err) != 0) {
+        fprintf(stderr, "line %d: %s\n", err.line, err.message);
+        return 1;
+    }
+
+    // Encode
+    char *text = NULL;
+    size_t len = 0;
+    if (xun_encode(doc, &text, &len) == 0) {
+        printf("%s", text);
+        free(text);
+    }
+
+    xun_free(doc);
+    return 0;
 }
-xun_free(doc);
 ```
 
-JavaScript is on npm: [`@qorm/xun`](https://www.npmjs.com/package/@qorm/xun). The other languages are not on central registries yet; install from Git or compile the sources.
+---
 
-## Status
+## Explicitly Out of Scope
 
-The language rules have settled. Parsers exist for JavaScript, Python, Go, Rust, Java, and C. `@qorm/xun` is published to npm as `0.1.0`.
+- Implicit typing (no Norway problem with `yes` / `NO`)
+- Dotted paths `a.b.c`, YAML anchors `&*`, multi-document separators `---`
+- Untyped inline arrays `[a, b]` (commas force quoting)
+- `inf` / `nan`, `null`
+- File inclusion / imports
+- Schema-level types (`enum`, secrets, range sets) inside core syntax

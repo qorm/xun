@@ -64,6 +64,10 @@ int xun_parse_file(const char *path, xun_value **out, xun_error *err);
 void xun_free(xun_value *v);
 const xun_value *xun_dict_get(const xun_value *dict, const char *key);
 
+/* 0 on success, -1 on error. Out string is null-terminated malloc'd buffer. Caller must free(). */
+int xun_encode(const xun_value *v, char **out_str, size_t *out_len);
+int xun_encode_file(const xun_value *v, const char *path);
+
 #ifdef __cplusplus
 }
 #endif

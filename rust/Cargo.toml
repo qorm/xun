@@ -1,8 +1,8 @@
 [package]
 name = "xun"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
-description = "XUN (X Unquoted Notation) parser"
+description = "XUN (X Unquoted Notation) parser and encoder"
 license = "MIT"
 repository = "https://github.com/qorm/xun"
 

@@ -101,11 +101,79 @@ static void test_untyped(void) {
   xun_free(doc);
 }
 
+static void test_encode_roundtrip(const char *root) {
+  char path[1024];
+  snprintf(path, sizeof path, "%s/testdata/example.xun", root);
+  xun_value *doc = NULL;
+  xun_error err;
+  if (xun_parse_file(path, &doc, &err) != 0) {
+    fail("parse file for roundtrip");
+    return;
+  }
+  char *encoded = NULL;
+  size_t len = 0;
+  if (xun_encode(doc, &encoded, &len) != 0) {
+    fail("encode failed");
+    xun_free(doc);
+    return;
+  }
+  xun_value *parsed = NULL;
+  if (xun_parse(encoded, &parsed, &err) != 0) {
+    fail("parse encoded text failed");
+    free(encoded);
+    xun_free(doc);
+    return;
+  }
+  expect_str(xun_dict_get(parsed, "endpoint"), "https://api.example.com/v2/orders", "roundtrip endpoint");
+  expect_str(xun_dict_get(parsed, "banner"), "Welcome\nto XUN", "roundtrip banner");
+  const xun_value *server = xun_dict_get(parsed, "server");
+  expect_str(xun_dict_get(server, "host"), "localhost", "roundtrip host");
+  expect_int(xun_dict_get(server, "port"), 8080, "roundtrip port");
+
+  free(encoded);
+  xun_free(parsed);
+  xun_free(doc);
+}
+
+static void test_file_write_and_read(const char *root) {
+  char in_path[1024];
+  snprintf(in_path, sizeof in_path, "%s/testdata/example.xun", root);
+  xun_value *doc = NULL;
+  xun_error err;
+  if (xun_parse_file(in_path, &doc, &err) != 0) {
+    fail("parse file for file write/read");
+    return;
+  }
+  const char *out_path = "/tmp/test_c_roundtrip.xun";
+  if (xun_encode_file(doc, out_path) != 0) {
+    fail("xun_encode_file failed");
+    xun_free(doc);
+    return;
+  }
+  xun_value *parsed = NULL;
+  if (xun_parse_file(out_path, &parsed, &err) != 0) {
+    fail("xun_parse_file from encoded file failed");
+    xun_free(doc);
+    return;
+  }
+  expect_str(xun_dict_get(parsed, "endpoint"), "https://api.example.com/v2/orders", "file endpoint");
+  expect_str(xun_dict_get(parsed, "banner"), "Welcome\nto XUN", "file banner");
+  const xun_value *server = xun_dict_get(parsed, "server");
+  expect_str(xun_dict_get(server, "host"), "localhost", "file host");
+  expect_int(xun_dict_get(server, "port"), 8080, "file port");
+
+  remove(out_path);
+  xun_free(parsed);
+  xun_free(doc);
+}
+
 int main(int argc, char **argv) {
   const char *root = argc > 1 ? argv[1] : "..";
   test_example(root);
   test_empty();
   test_untyped();
+  test_encode_roundtrip(root);
+  test_file_write_and_read(root);
   expect_err("a: 1\na: 2\n", "duplicate");
   expect_err("x: !f 8080\n", "float");
   expect_err("a: |\n  hi\n", "multiline");
@@ -114,9 +182,9 @@ int main(int argc, char **argv) {
   expect_err("v: !s[a, b]\n", "string compact");
   xun_value *doc = NULL;
   xun_error err;
-  if (xun_parse("$api: https://x.test\na: !s $api\n", &doc, &err) != 0) fail("literal s");
+  if (xun_parse("a: !s !important\n", &doc, &err) != 0) fail("literal s");
   else {
-    expect_str(xun_dict_get(doc, "a"), "$api", "literal $");
+    expect_str(xun_dict_get(doc, "a"), "!important", "literal s");
     xun_free(doc);
   }
   if (failed) {

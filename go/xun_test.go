@@ -82,3 +82,99 @@ func TestDuplicate(t *testing.T) {
 		t.Fatal("expected error")
 	}
 }
+
+func TestEncodeAndRoundTrip(t *testing.T) {
+	data := map[string]any{
+		"server": map[string]any{
+			"host": "localhost",
+			"port": int64(8080),
+			"tls": map[string]any{
+				"cert": "/etc/ssl/cert.pem",
+			},
+		},
+		"empty_dict": map[string]any{},
+		"empty_list": []any{},
+		"features":   []any{"auth", "cache"},
+		"banner":     "Welcome\nto XUN",
+		"flag":       true,
+		"rate":       3.14,
+		"color":      []byte{0xDE, 0xAD, 0xBE, 0xEF},
+		"py":         Tagged{Tag: "ver", Value: "3.10"},
+	}
+
+	encoded, err := Encode(data)
+	if err != nil {
+		t.Fatalf("encode error: %v", err)
+	}
+
+	parsed, err := Parse(encoded)
+	if err != nil {
+		t.Fatalf("parse error: %v\nencoded text:\n%s", err, encoded)
+	}
+
+	m := parsed.(map[string]any)
+	server := m["server"].(map[string]any)
+	if server["host"] != "localhost" || server["port"] != int64(8080) {
+		t.Fatalf("server mismatch: %v", server)
+	}
+	if m["banner"] != "Welcome\nto XUN" {
+		t.Fatalf("banner mismatch: %v", m["banner"])
+	}
+	if m["flag"] != true {
+		t.Fatalf("flag mismatch: %v", m["flag"])
+	}
+	if !bytes.Equal(m["color"].([]byte), []byte{0xDE, 0xAD, 0xBE, 0xEF}) {
+		t.Fatalf("color mismatch: %v", m["color"])
+	}
+	if m["py"].(Tagged) != (Tagged{Tag: "ver", Value: "3.10"}) {
+		t.Fatalf("py mismatch: %v", m["py"])
+	}
+}
+
+func TestFileWriteAndRead(t *testing.T) {
+	data := map[string]any{
+		"app": "go-xun",
+		"version": Tagged{Tag: "ver", Value: "0.1.1"},
+		"server": map[string]any{
+			"host": "0.0.0.0",
+			"port": int64(9000),
+		},
+		"tags": []any{"production", "cluster"},
+		"bytes": []byte{0x01, 0x02, 0xFE, 0xFF},
+		"multiline": "First\nSecond\nThird",
+	}
+
+	bytesData, err := Marshal(data)
+	if err != nil {
+		t.Fatalf("marshal error: %v", err)
+	}
+
+	tmpFile := filepath.Join(t.TempDir(), "config.xun")
+	if err := os.WriteFile(tmpFile, bytesData, 0644); err != nil {
+		t.Fatalf("write file error: %v", err)
+	}
+
+	readBytes, err := os.ReadFile(tmpFile)
+	if err != nil {
+		t.Fatalf("read file error: %v", err)
+	}
+
+	parsed, err := Parse(string(readBytes))
+	if err != nil {
+		t.Fatalf("parse error: %v", err)
+	}
+
+	m := parsed.(map[string]any)
+	if m["app"] != "go-xun" {
+		t.Fatalf("app mismatch: %v", m["app"])
+	}
+	if m["version"].(Tagged) != (Tagged{Tag: "ver", Value: "0.1.1"}) {
+		t.Fatalf("version mismatch: %v", m["version"])
+	}
+	if m["multiline"] != "First\nSecond\nThird" {
+		t.Fatalf("multiline mismatch: %v", m["multiline"])
+	}
+	if !bytes.Equal(m["bytes"].([]byte), []byte{0x01, 0x02, 0xFE, 0xFF}) {
+		t.Fatalf("bytes mismatch: %v", m["bytes"])
+	}
+}

@@ -4,9 +4,9 @@ import base64
 import ipaddress
 import re
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, TextIO
 
-__all__ = ["parse", "Tagged", "XunError"]
+__all__ = ["parse", "encode", "dump", "dumps", "Tagged", "XunError"]
 
 IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 MAX_BYTES = 1024 * 1024
@@ -19,7 +19,7 @@ class XunError(ValueError):
         self.line = line
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class Tagged:
     tag: str
     value: str
@@ -85,8 +85,6 @@ class Parser:
     def __init__(self, lines: list[Line]) -> None:
         self.lines = lines
         self.i = 0
-        self.env: dict[str, Any] = {}
-        self.resolving: set[str] = set()
 
     def peek(self) -> Line | None:
         return self.lines[self.i] if self.i < len(self.lines) else None
@@ -101,7 +99,6 @@ class Parser:
                 break
 
     def parse_document(self) -> Any:
-        self.parse_vars()
         self.skip_noise()
         if not self.peek():
             return {}
@@ -112,27 +109,6 @@ class Parser:
         if self.is_list_item(first):
             raise XunError("root must be a dictionary", first.n)
         return self.parse_dict(0, 0)
-
-    def parse_vars(self) -> None:
-        while self.peek():
-            l = self.peek()
-            assert l is not None
-            if l.blank or l.text.startswith("#"):
-                self.i += 1
-                continue
-            if l.indent != 0 or not l.text.startswith("$"):
-                break
-            m = re.match(r"^\$([A-Za-z_][A-Za-z0-9_]*):(.*)$", l.text)
-            if not m:
-                raise XunError("invalid variable definition", l.n)
-            if m.group(2) and not m.group(2).startswith(" "):
-                raise XunError("expected ': ' in variable definition", l.n)
-            name = m.group(1)
-            if name in self.env:
-                raise XunError(f"duplicate variable ${name}", l.n)
-            self.i += 1
-            raw = m.group(2)[1:] if m.group(2).startswith(" ") else ""
-            self.env[name] = self.parse_value(raw, 0, l.n, 1)
 
     def parse_dict(self, indent: int, depth: int) -> dict[str, Any]:
         if depth > MAX_DEPTH:
@@ -147,8 +123,6 @@ class Parser:
                 break
             if l.indent > indent:
                 raise XunError("invalid indent jump", l.n)
-            if l.text.startswith("$") and indent == 0:
-                raise XunError("variable definitions only allowed at file start", l.n)
             if self.is_list_item(l):
                 raise XunError("cannot mix list items into a dictionary", l.n)
             key, rest = _split_key(l.text, l.n)
@@ -196,9 +170,7 @@ class Parser:
             return self.parse_tagged(raw, parent_indent, line_no, depth)
         if raw == "":
             return self.parse_empty_or_nested(parent_indent, line_no, depth, None)
-        if _is_whole_ref(raw):
-            return self.lookup(raw[1:], line_no)
-        return _interpolate(raw, lambda name: self.lookup(name, line_no))
+        return raw
 
     def parse_tagged(self, raw: str, parent_indent: int, line_no: int, depth: int) -> Any:
         m = re.match(r"^!([A-Za-z_][A-Za-z0-9_]*)(.*)$", raw)
@@ -225,8 +197,6 @@ class Parser:
             return text if tag == "s" else apply_tag(tag, text, line_no)
         if tag == "s":
             return body
-        if _is_whole_ref(body):
-            return self.lookup(body[1:], line_no)
         return apply_tag(tag, body, line_no)
 
     def parse_empty_or_nested(
@@ -272,22 +242,6 @@ class Parser:
             self.i += 1
         raise XunError("unclosed multiline block", line_no)
 
-    def lookup(self, name: str, line_no: int) -> Any:
-        if name not in self.env:
-            raise XunError(f"undefined variable ${name}", line_no)
-        if name in self.resolving:
-            raise XunError(f"cyclic variable ${name}", line_no)
-        v = self.env[name]
-        if isinstance(v, str) and _is_whole_ref(v):
-            self.resolving.add(name)
-            try:
-                r = self.lookup(v[1:], line_no)
-                self.env[name] = r
-                return r
-            finally:
-                self.resolving.discard(name)
-        return v
-
 
 def _split_key(text: str, n: int) -> tuple[str, str]:
     idx = text.find(": ")
@@ -307,14 +261,6 @@ def _match_multiline(raw: str) -> tuple[str | None, str] | None:
     return None
 
 
-def _is_whole_ref(raw: str) -> bool:
-    return bool(re.match(r"^\$[A-Za-z_][A-Za-z0-9_]*$", raw))
-
-
-def _interpolate(s: str, get) -> str:
-    return re.sub(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}", lambda m: glyph_of(get(m.group(1))), s)
-
-
 def glyph_of(v: Any) -> str:
     if isinstance(v, Tagged):
         return v.value
@@ -324,7 +270,7 @@ def glyph_of(v: Any) -> str:
         return "true" if v else "false"
     if isinstance(v, (str, int, float)):
         return str(v)
-    raise XunError("cannot interpolate a collection")
+    raise XunError("cannot stringify a collection as scalar glyph")
 
 
 def _split_compact(inner: str) -> list[str]:
@@ -464,3 +410,138 @@ def _parse_unix(g: str, n: int) -> int | float:
     if re.fullmatch(r"-?\d+\.\d+", s):
         return float(s)
     raise XunError("invalid unix timestamp", n)
+
+
+# --- Encoder ---
+
+def encode(value: Any) -> str:
+    if not isinstance(value, dict):
+        raise XunError("root must be a dictionary")
+    if not value:
+        return ""
+    lines: list[str] = []
+    _encode_dict_items(value, 0, lines)
+    return "\n".join(lines) + "\n"
+
+
+def dumps(value: Any) -> str:
+    return encode(value)
+
+
+def dump(value: Any, fp: TextIO) -> None:
+    fp.write(encode(value))
+
+
+def _validate_key(key: Any) -> str:
+    if not isinstance(key, str) or not key:
+        raise XunError(f"key must be a non-empty string, got: {key!r}")
+    if "\n" in key or "\r" in key or ": " in key or key.endswith(":"):
+        raise XunError(f"invalid key format: {key!r}")
+    return key
+
+
+def _encode_dict_items(d: dict[str, Any], depth: int, out: list[str]) -> None:
+    if depth > MAX_DEPTH:
+        raise XunError("nesting depth exceeds limit")
+    indent = "  " * depth
+    for k, v in d.items():
+        key = _validate_key(k)
+        if isinstance(v, dict):
+            if not v:
+                out.append(f"{indent}{key}: {{}}")
+            else:
+                out.append(f"{indent}{key}:")
+                _encode_dict_items(v, depth + 1, out)
+        elif isinstance(v, (list, tuple)):
+            if not v:
+                out.append(f"{indent}{key}: []")
+            else:
+                out.append(f"{indent}{key}:")
+                _encode_list_items(v, depth + 1, out)
+        elif isinstance(v, str):
+            if "\n" in v or "\r" in v:
+                out.append(f"{indent}{key}: |")
+                for line in v.splitlines():
+                    out.append(f"{indent}  {line}")
+                out.append(f"{indent}|")
+            elif v == "":
+                out.append(f"{indent}{key}:")
+            else:
+                if v.startswith("!") or v in ("[]", "{}", "|") or v.startswith("|"):
+                    out.append(f"{indent}{key}: !s {v}")
+                else:
+                    out.append(f"{indent}{key}: {v}")
+        elif isinstance(v, bool):
+            out.append(f"{indent}{key}: !b {'true' if v else 'false'}")
+        elif isinstance(v, int):
+            out.append(f"{indent}{key}: !i {v}")
+        elif isinstance(v, float):
+            s = str(v)
+            if "." not in s and "e" not in s and "E" not in s:
+                s += ".0"
+            out.append(f"{indent}{key}: !f {s}")
+        elif isinstance(v, (bytes, bytearray)):
+            out.append(f"{indent}{key}: !xb {v.hex().upper()}")
+        elif isinstance(v, Tagged):
+            if "\n" in v.value or "\r" in v.value:
+                out.append(f"{indent}{key}: !{v.tag} |")
+                for line in v.value.splitlines():
+                    out.append(f"{indent}  {line}")
+                out.append(f"{indent}|")
+            else:
+                out.append(f"{indent}{key}: !{v.tag} {v.value}")
+        else:
+            raise XunError(f"unsupported value type: {type(v).__name__} for key '{key}'")
+
+
+def _encode_list_items(items: list[Any] | tuple[Any, ...], depth: int, out: list[str]) -> None:
+    if depth > MAX_DEPTH:
+        raise XunError("nesting depth exceeds limit")
+    indent = "  " * depth
+    for v in items:
+        if isinstance(v, dict):
+            if not v:
+                out.append(f"{indent}- {{}}")
+            else:
+                out.append(f"{indent}-")
+                _encode_dict_items(v, depth + 1, out)
+        elif isinstance(v, (list, tuple)):
+            if not v:
+                out.append(f"{indent}- []")
+            else:
+                out.append(f"{indent}-")
+                _encode_list_items(v, depth + 1, out)
+        elif isinstance(v, str):
+            if "\n" in v or "\r" in v:
+                out.append(f"{indent}- |")
+                for line in v.splitlines():
+                    out.append(f"{indent}  {line}")
+                out.append(f"{indent}|")
+            elif v == "":
+                out.append(f"{indent}-")
+            else:
+                if v.startswith("!") or v in ("[]", "{}", "|") or v.startswith("|"):
+                    out.append(f"{indent}- !s {v}")
+                else:
+                    out.append(f"{indent}- {v}")
+        elif isinstance(v, bool):
+            out.append(f"{indent}- !b {'true' if v else 'false'}")
+        elif isinstance(v, int):
+            out.append(f"{indent}- !i {v}")
+        elif isinstance(v, float):
+            s = str(v)
+            if "." not in s and "e" not in s and "E" not in s:
+                s += ".0"
+            out.append(f"{indent}- !f {s}")
+        elif isinstance(v, (bytes, bytearray)):
+            out.append(f"{indent}- !xb {v.hex().upper()}")
+        elif isinstance(v, Tagged):
+            if "\n" in v.value or "\r" in v.value:
+                out.append(f"{indent}- !{v.tag} |")
+                for line in v.value.splitlines():
+                    out.append(f"{indent}  {line}")
+                out.append(f"{indent}|")
+            else:
+                out.append(f"{indent}- !{v.tag} {v.value}")
+        else:
+            raise XunError(f"unsupported list item type: {type(v).__name__}")

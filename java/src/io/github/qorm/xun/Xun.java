@@ -10,7 +10,7 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
- * XUN (X Unquoted Notation) parser.
+ * XUN (X Unquoted Notation) parser and encoder.
  * Root value is always a dictionary.
  */
 public final class Xun {
@@ -30,7 +30,9 @@ public final class Xun {
 
     @Override
     public boolean equals(Object o) {
-      if (!(o instanceof Tagged t)) return false;
+      if (this == o) return true;
+      if (!(o instanceof Tagged)) return false;
+      Tagged t = (Tagged) o;
       return tag.equals(t.tag) && value.equals(t.value);
     }
 
@@ -66,6 +68,23 @@ public final class Xun {
     if (source.indexOf('\0') >= 0) throw new Error("NUL is not allowed");
     if (!source.isEmpty() && source.charAt(0) == '\uFEFF') source = source.substring(1);
     return new Parser(splitLines(source)).parseDocument();
+  }
+
+  public static String encode(Object value) {
+    if (!(value instanceof Map)) {
+      throw new Error("root must be a dictionary");
+    }
+    Map<?, ?> map = (Map<?, ?>) value;
+    if (map.isEmpty()) {
+      return "";
+    }
+    List<String> lines = new ArrayList<>();
+    encodeMap(map, 0, lines);
+    return String.join("\n", lines) + "\n";
+  }
+
+  public static String dump(Object value) {
+    return encode(value);
   }
 
   private static final class Line {
@@ -130,8 +149,6 @@ public final class Xun {
   private static final class Parser {
     final List<Line> lines;
     int i;
-    final Map<String, Object> env = new LinkedHashMap<>();
-    final java.util.HashSet<String> resolving = new java.util.HashSet<>();
 
     Parser(List<Line> lines) {
       this.lines = lines;
@@ -150,7 +167,6 @@ public final class Xun {
     }
 
     Map<String, Object> parseDocument() {
-      parseVars();
       skipNoise();
       if (peek() == null) return new LinkedHashMap<>();
       Line first = peek();
@@ -159,31 +175,11 @@ public final class Xun {
       return parseDict(0, 0);
     }
 
-    void parseVars() {
-      Pattern def = Pattern.compile("^\\$([A-Za-z_][A-Za-z0-9_]*):(.*)$");
-      while (peek() != null) {
-        Line l = peek();
-        if (l.blank || l.text.startsWith("#")) {
-          i++;
-          continue;
-        }
-        if (l.indent != 0 || !l.text.startsWith("$")) break;
-        Matcher m = def.matcher(l.text);
-        if (!m.matches()) throw new Error("invalid variable definition", l.n);
-        String after = m.group(2);
-        if (!after.isEmpty() && !after.startsWith(" ")) {
-          throw new Error("expected ': ' in variable definition", l.n);
-        }
-        String name = m.group(1);
-        if (env.containsKey(name)) throw new Error("duplicate variable $" + name, l.n);
-        i++;
-        String raw = after.startsWith(" ") ? after.substring(1) : "";
-        env.put(name, parseValue(raw, 0, l.n, 1));
-      }
-    }
-
     Map<String, Object> parseDict(int indent, int depth) {
-      if (depth > MAX_DEPTH) throw new Error("nesting exceeds 64", peek() == null ? 0 : peek().n);
+      if (depth > MAX_DEPTH) {
+        int n = peek() == null ? 0 : peek().n;
+        throw new Error("nesting exceeds 64", n);
+      }
       Map<String, Object> obj = new LinkedHashMap<>();
       while (peek() != null) {
         skipNoise();
@@ -191,20 +187,22 @@ public final class Xun {
         if (l == null || l.blank) break;
         if (l.indent < indent) break;
         if (l.indent > indent) throw new Error("invalid indent jump", l.n);
-        if (l.text.startsWith("$") && indent == 0) {
-          throw new Error("variable definitions only allowed at file start", l.n);
-        }
         if (isListItem(l)) throw new Error("cannot mix list items into a dictionary", l.n);
-        String[] kr = splitKey(l.text, l.n);
-        if (obj.containsKey(kr[0])) throw new Error("duplicate key '" + kr[0] + "'", l.n);
+        String[] parts = splitKey(l.text, l.n);
+        String key = parts[0];
+        String rest = parts[1];
+        if (obj.containsKey(key)) throw new Error("duplicate key '" + key + "'", l.n);
         i++;
-        obj.put(kr[0], parseValue(kr[1], indent, l.n, depth + 1));
+        obj.put(key, parseValue(rest, indent, l.n, depth + 1));
       }
       return obj;
     }
 
     List<Object> parseList(int indent, int depth, String itemTag) {
-      if (depth > MAX_DEPTH) throw new Error("nesting exceeds 64", peek() == null ? 0 : peek().n);
+      if (depth > MAX_DEPTH) {
+        int n = peek() == null ? 0 : peek().n;
+        throw new Error("nesting exceeds 64", n);
+      }
       List<Object> arr = new ArrayList<>();
       while (peek() != null) {
         skipNoise();
@@ -216,7 +214,9 @@ public final class Xun {
         String rest = l.text.equals("-") ? "" : l.text.substring(2);
         i++;
         Object val = parseValue(rest, indent, l.n, depth + 1);
-        if (itemTag != null) val = applyTag(itemTag, glyphOf(val), l.n);
+        if (itemTag != null) {
+          val = applyTag(itemTag, glyphOf(val), l.n);
+        }
         arr.add(val);
       }
       return arr;
@@ -228,13 +228,18 @@ public final class Xun {
 
     Object parseValue(String raw, int parentIndent, int lineNo, int depth) {
       if (raw.equals("[]")) return new ArrayList<>();
-      if (raw.equals("{}")) return new LinkedHashMap<>();
-      String ml = matchMultiline(raw);
-      if (ml != null) return readMultiline(parentIndent, ml, lineNo);
-      if (raw.startsWith("!")) return parseTagged(raw, parentIndent, lineNo, depth);
-      if (raw.isEmpty()) return parseEmptyOrNested(parentIndent, depth, null);
-      if (isWholeRef(raw)) return lookup(raw.substring(1), lineNo);
-      return interpolate(raw, lineNo);
+      if (raw.equals("{}")) return new LinkedHashMap<String, Object>();
+      String closer = matchMultiline(raw);
+      if (closer != null) {
+        return readMultiline(parentIndent, null, closer, lineNo);
+      }
+      if (raw.startsWith("!")) {
+        return parseTagged(raw, parentIndent, lineNo, depth);
+      }
+      if (raw.isEmpty()) {
+        return parseEmptyOrNested(parentIndent, lineNo, depth, null);
+      }
+      return raw;
     }
 
     Object parseTagged(String raw, int parentIndent, int lineNo, int depth) {
@@ -248,26 +253,30 @@ public final class Xun {
         }
         if (!rest.endsWith("]")) throw new Error("unclosed compact array", lineNo);
         String inner = rest.substring(1, rest.length() - 1);
-        if (inner.isEmpty()) return parseEmptyOrNested(parentIndent, depth, tag);
+        if (inner.isEmpty()) {
+          return parseEmptyOrNested(parentIndent, lineNo, depth, tag);
+        }
+        String[] parts = splitCompact(inner);
         List<Object> out = new ArrayList<>();
-        for (String g : inner.split(",", -1)) out.add(applyTag(tag, g.trim(), lineNo));
+        for (String g : parts) {
+          out.add(applyTag(tag, g, lineNo));
+        }
         return out;
       }
       if (rest.isEmpty()) throw new Error("missing value for !" + tag, lineNo);
       if (!rest.startsWith(" ")) throw new Error("expected space after type tag", lineNo);
       String body = rest.substring(1);
-      String ml = matchMultiline(body);
-      if (ml != null) {
-        Object text = readMultiline(parentIndent, ml, lineNo);
+      String closer = matchMultiline(body);
+      if (closer != null) {
+        String text = (String) readMultiline(parentIndent, null, closer, lineNo);
         if (tag.equals("s")) return text;
-        return applyTag(tag, (String) text, lineNo);
+        return applyTag(tag, text, lineNo);
       }
       if (tag.equals("s")) return body;
-      if (isWholeRef(body)) return lookup(body.substring(1), lineNo);
       return applyTag(tag, body, lineNo);
     }
 
-    Object parseEmptyOrNested(int parentIndent, int depth, String itemTag) {
+    Object parseEmptyOrNested(int parentIndent, int lineNo, int depth, String itemTag) {
       skipNoise();
       Line n = peek();
       int child = parentIndent + 2;
@@ -280,65 +289,34 @@ public final class Xun {
       return parseDict(child, depth);
     }
 
-    Object readMultiline(int parentIndent, String closer, int lineNo) {
+    Object readMultiline(int parentIndent, String tag, String closer, int lineNo) {
       int base = parentIndent + 2;
       List<String> parts = new ArrayList<>();
       while (peek() != null) {
         Line l = peek();
         String stripped = rstripSpaceTab(l.raw);
-        String content = stripped.replaceFirst("^ +", "");
-        int ind = leadingSpaces(l.raw);
+        String content = stripped.stripLeading();
+        int ind = l.raw.length() - l.raw.stripLeading().length();
         if (!l.blank && ind == parentIndent && content.equals(closer)) {
           i++;
-          return String.join("\n", parts);
+          String s = String.join("\n", parts);
+          if (tag != null && !tag.equals("s")) return applyTag(tag, s, lineNo);
+          return s;
         }
         if (l.blank) {
           parts.add("");
           i++;
           continue;
         }
-        if (ind < base) {
+        if (ind < base && !l.blank) {
           throw new Error("multiline body must indent +2, or close at opener indent", l.n);
         }
-        if (l.raw.indexOf('\t') >= 0) throw new Error("tab is not allowed", l.n);
-        parts.add(l.raw.length() >= base ? l.raw.substring(base) : "");
+        if (l.raw.contains("\t")) throw new Error("tab is not allowed", l.n);
+        parts.add(l.raw.substring(base));
         i++;
       }
       throw new Error("unclosed multiline block", lineNo);
     }
-
-    Object lookup(String name, int lineNo) {
-      if (!env.containsKey(name)) throw new Error("undefined variable $" + name, lineNo);
-      if (resolving.contains(name)) throw new Error("cyclic variable $" + name, lineNo);
-      Object v = env.get(name);
-      if (v instanceof String s && isWholeRef(s)) {
-        resolving.add(name);
-        try {
-          Object r = lookup(s.substring(1), lineNo);
-          env.put(name, r);
-          return r;
-        } finally {
-          resolving.remove(name);
-        }
-      }
-      return v;
-    }
-
-    String interpolate(String s, int lineNo) {
-      Matcher m = Pattern.compile("\\$\\{([A-Za-z_][A-Za-z0-9_]*)\\}").matcher(s);
-      StringBuffer sb = new StringBuffer();
-      while (m.find()) {
-        m.appendReplacement(sb, Matcher.quoteReplacement(glyphOf(lookup(m.group(1), lineNo))));
-      }
-      m.appendTail(sb);
-      return sb.toString();
-    }
-  }
-
-  private static int leadingSpaces(String s) {
-    int i = 0;
-    while (i < s.length() && s.charAt(i) == ' ') i++;
-    return i;
   }
 
   private static String[] splitKey(String text, int n) {
@@ -352,28 +330,41 @@ public final class Xun {
 
   private static String matchMultiline(String raw) {
     if (raw.equals("|")) return "|";
-    if (raw.matches("^\\|[A-Za-z_][A-Za-z0-9_]*$")) return raw.substring(1);
+    Matcher m = Pattern.compile("^\\|([A-Za-z_][A-Za-z0-9_]*)$").matcher(raw);
+    if (m.matches()) return m.group(1);
     return null;
   }
 
-  private static boolean isWholeRef(String raw) {
-    return raw.matches("^\\$[A-Za-z_][A-Za-z0-9_]*$");
+  private static String glyphOf(Object v) {
+    if (v instanceof Tagged) return ((Tagged) v).value;
+    if (v instanceof byte[]) return hexEncode((byte[]) v);
+    if (v instanceof Boolean) return ((Boolean) v) ? "true" : "false";
+    if (v instanceof String || v instanceof Number) return String.valueOf(v);
+    throw new Error("cannot stringify a collection as scalar glyph");
   }
 
-  static String glyphOf(Object v) {
-    if (v instanceof Tagged t) return t.value;
-    if (v instanceof byte[] b) {
-      StringBuilder sb = new StringBuilder();
-      for (byte x : b) sb.append(String.format("%02x", x & 0xff));
-      return sb.toString();
+  private static String[] splitCompact(String inner) {
+    String[] parts = inner.split(",");
+    for (int i = 0; i < parts.length; i++) parts[i] = parts[i].trim();
+    return parts;
+  }
+
+  private static String stripUnderscores(String s, int n) {
+    if (s.contains("__") || s.startsWith("_") || s.endsWith("_")) {
+      throw new Error("invalid numeric underscores", n);
     }
-    if (v instanceof String s) return s;
-    if (v instanceof Boolean b) return b ? "true" : "false";
-    if (v instanceof Number) return v.toString();
-    throw new Error("cannot interpolate a collection");
+    return s.replace("_", "");
   }
 
-  static Object applyTag(String tag, String glyph, int n) {
+  private static String hexEncode(byte[] b) {
+    StringBuilder sb = new StringBuilder(b.length * 2);
+    for (byte x : b) {
+      sb.append(String.format("%02x", x));
+    }
+    return sb.toString();
+  }
+
+  private static Object applyTag(String tag, String glyph, int n) {
     switch (tag) {
       case "s":
         return glyph;
@@ -383,73 +374,84 @@ public final class Xun {
         return parseI(glyph, n);
       case "f":
         return parseF(glyph, n);
-      case "x":
-        return Long.parseUnsignedLong(stripUnderscores(glyph, n), 16);
+      case "x": {
+        String s = stripUnderscores(glyph, n);
+        if (!s.matches("^[0-9A-Fa-f]+$")) throw new Error("invalid hex", n);
+        return Long.parseLong(s, 16);
+      }
       case "xb": {
         String s = glyph.replace("_", "");
-        if (!s.matches("[0-9A-Fa-f]*") || s.length() % 2 != 0 || s.isEmpty()) {
+        if (!s.matches("^[0-9A-Fa-f]*$") || s.length() % 2 != 0 || s.isEmpty()) {
           throw new Error("hex bytes must be an even number of digits", n);
         }
-        byte[] out = new byte[s.length() / 2];
-        for (int i = 0; i < out.length; i++) {
-          out[i] = (byte) Integer.parseInt(s.substring(i * 2, i * 2 + 2), 16);
+        byte[] b = new byte[s.length() / 2];
+        for (int i = 0; i < s.length(); i += 2) {
+          b[i / 2] = (byte) Integer.parseInt(s.substring(i, i + 2), 16);
         }
-        return out;
+        return b;
       }
-      case "o":
-        if (!glyph.matches("[0-7]+")) throw new Error("invalid octal", n);
+      case "o": {
+        if (!glyph.matches("^[0-7]+$")) throw new Error("invalid octal", n);
         return Long.parseLong(glyph, 8);
-      case "b":
+      }
+      case "b": {
         if (glyph.equals("true")) return Boolean.TRUE;
         if (glyph.equals("false")) return Boolean.FALSE;
         throw new Error("boolean must be true or false", n);
-      case "d":
-        if (!glyph.matches("\\d{4}-\\d{2}-\\d{2}")) throw new Error("invalid date", n);
+      }
+      case "d": {
+        if (!glyph.matches("^\\d{4}-\\d{2}-\\d{2}$")) throw new Error("invalid date", n);
         return new Tagged("d", glyph);
-      case "t":
-        if (!glyph.matches("\\d{2}:\\d{2}(:\\d{2}(\\.\\d+)?)?")) throw new Error("invalid time", n);
+      }
+      case "t": {
+        if (!glyph.matches("^\\d{2}:\\d{2}(:\\d{2}(\\.\\d+)?)?$")) throw new Error("invalid time", n);
         return new Tagged("t", glyph);
-      case "dt":
-        if (!glyph.matches("\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?(Z|[+-]\\d{2}:\\d{2})")) {
+      }
+      case "dt": {
+        if (!glyph.matches("^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?(Z|[+-]\\d{2}:\\d{2})$")) {
           throw new Error("datetime must include a timezone offset", n);
         }
         return new Tagged("dt", glyph);
-      case "tz":
-        if (!glyph.equals("Z")
-            && !glyph.equals("UTC")
-            && !glyph.matches("[+-]\\d{2}:\\d{2}")
-            && !glyph.matches("[A-Za-z_]+(/[A-Za-z0-9_+-]+)+")) {
+      }
+      case "tz": {
+        if (!glyph.equals("Z") && !glyph.equals("UTC") && !glyph.matches("^[+-]\\d{2}:\\d{2}$") && !glyph.matches("^[A-Za-z_]+(/[A-Za-z0-9_+-]+)+$")) {
           throw new Error("invalid time zone", n);
         }
         return new Tagged("tz", glyph);
-      case "du":
-        if (glyph.isEmpty() || !glyph.matches("(\\d+d)?(\\d+h)?(\\d+m)?(\\d+(\\.\\d+)?s)?")) {
+      }
+      case "du": {
+        if (glyph.isEmpty() || !glyph.matches("^(\\d+d)?(\\d+h)?(\\d+m)?(\\d+(\\.\\d+)?s)?$")) {
           throw new Error("invalid duration", n);
         }
         return new Tagged("du", glyph);
-      case "sz":
-        if (!glyph.matches("\\d+(\\.\\d+)?(B|KB|MB|GB|TB|PB|KiB|MiB|GiB|TiB|PiB)")) {
+      }
+      case "sz": {
+        if (!glyph.matches("^\\d+(\\.\\d+)?(B|KB|MB|GB|TB|PB|KiB|MiB|GiB|TiB|PiB)$")) {
           throw new Error("invalid data size", n);
         }
         return new Tagged("sz", glyph);
+      }
       case "unix":
         return parseUnix(glyph, n);
-      case "ver":
-        if (!glyph.matches("\\d+(\\.\\d+)*")) throw new Error("invalid version", n);
+      case "ver": {
+        if (!glyph.matches("^\\d+(\\.\\d+)*$")) throw new Error("invalid version", n);
         return new Tagged("ver", glyph);
-      case "uuid":
-        if (!glyph.matches("[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")) {
+      }
+      case "uuid": {
+        if (!glyph.matches("^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")) {
           throw new Error("invalid uuid", n);
         }
         return new Tagged("uuid", glyph);
-      case "ip":
+      }
+      case "ip": {
         if (!isIp(glyph)) throw new Error("invalid ip", n);
         return new Tagged("ip", glyph);
+      }
       case "b64": {
         String s = glyph.replaceAll("\\s+", "");
         try {
           return Base64.getDecoder().decode(s);
-        } catch (IllegalArgumentException e) {
+        } catch (Exception e) {
           throw new Error("invalid base64", n);
         }
       }
@@ -470,24 +472,17 @@ public final class Xun {
     }
   }
 
-  private static String stripUnderscores(String s, int n) {
-    if (s.contains("__") || s.startsWith("_") || s.endsWith("_")) {
-      throw new Error("invalid numeric underscores", n);
-    }
-    return s.replace("_", "");
-  }
-
   private static Object parseN(String g, int n) {
     String s = stripUnderscores(g, n);
-    if (s.matches("-?0\\d.*")) throw new Error("leading zeros are not allowed", n);
-    if (s.matches("-?\\d+")) {
+    if (s.matches("^-?0\\d.*")) throw new Error("leading zeros are not allowed", n);
+    if (s.matches("^-?\\d+$")) {
       try {
         return Long.parseLong(s);
       } catch (NumberFormatException e) {
         throw new Error("integer overflow", n);
       }
     }
-    if (s.matches("-?\\d+\\.\\d+([eE][+-]?\\d+)?") || s.matches("-?\\d+[eE][+-]?\\d+")) {
+    if (s.matches("^-?\\d+\\.\\d+([eE][+-]?\\d+)?$") || s.matches("^-?\\d+[eE][+-]?\\d+$")) {
       return Double.parseDouble(s);
     }
     throw new Error("invalid number", n);
@@ -495,8 +490,8 @@ public final class Xun {
 
   private static long parseI(String g, int n) {
     String s = stripUnderscores(g, n);
-    if (!s.matches("-?\\d+")) throw new Error("invalid integer", n);
-    if (s.matches("-?0\\d.*")) throw new Error("leading zeros are not allowed", n);
+    if (!s.matches("^-?\\d+$")) throw new Error("invalid integer", n);
+    if (s.matches("^-?0\\d.*")) throw new Error("leading zeros are not allowed", n);
     try {
       return Long.parseLong(s);
     } catch (NumberFormatException e) {
@@ -506,44 +501,176 @@ public final class Xun {
 
   private static double parseF(String g, int n) {
     String s = stripUnderscores(g, n);
-    if (!s.contains(".") && !s.matches(".*[eE].*")) {
+    if (!s.contains(".") && !s.contains("e") && !s.contains("E")) {
       throw new Error("float must contain '.' or 'e'", n);
     }
-    try {
-      return Double.parseDouble(s);
-    } catch (NumberFormatException e) {
-      throw new Error("invalid float", n);
-    }
+    return Double.parseDouble(s);
   }
 
   private static Object parseUnix(String g, int n) {
     String s = stripUnderscores(g, n);
-    if (s.matches("-?0\\d.*")) throw new Error("leading zeros are not allowed", n);
-    if (s.matches("-?\\d+")) return Long.parseLong(s);
-    if (s.matches("-?\\d+\\.\\d+")) return Double.parseDouble(s);
+    if (s.matches("^-?0\\d.*")) throw new Error("leading zeros are not allowed", n);
+    if (s.matches("^-?\\d+$")) return Long.parseLong(s);
+    if (s.matches("^-?\\d+\\.\\d+$")) return Double.parseDouble(s);
     throw new Error("invalid unix timestamp", n);
   }
 
   private static boolean isIp(String s) {
-    if (s.matches("\\d{1,3}(\\.\\d{1,3}){3}")) {
-      String[] p = s.split("\\.");
-      for (String part : p) {
-        int v = Integer.parseInt(part);
-        if (v < 0 || v > 255 || !String.valueOf(v).equals(part)) return false;
+    String[] parts = s.split("\\.");
+    if (parts.length == 4) {
+      for (String p : parts) {
+        if (!p.matches("^\\d+$")) return false;
+        int num = Integer.parseInt(p);
+        if (num < 0 || num > 255 || !String.valueOf(num).equals(p)) return false;
       }
       return true;
     }
-    if (s.indexOf(':') >= 0) {
-      if (s.indexOf('.') >= 0) return false;
-      String[] parts = s.split(":", -1);
-      if (parts.length > 8) return false;
-      int empty = 0;
-      for (String p : parts) {
-        if (p.isEmpty()) empty++;
-        else if (!p.matches("[0-9A-Fa-f]{1,4}")) return false;
-      }
-      return empty <= 2;
+    return s.contains(":") && !s.contains(":::") && s.matches("^[0-9a-fA-F:]+$");
+  }
+
+  // --- Encoder ---
+
+  private static String validateKey(String key) {
+    if (key == null || key.isEmpty()) {
+      throw new Error("key must be a non-empty string");
     }
-    return false;
+    if (key.contains("\n") || key.contains("\r") || key.contains(": ") || key.endsWith(":")) {
+      throw new Error("invalid key format: " + key);
+    }
+    return key;
+  }
+
+  private static void encodeMap(Map<?, ?> map, int depth, List<String> lines) {
+    if (depth > MAX_DEPTH) throw new Error("nesting depth exceeds limit");
+    String indent = "  ".repeat(depth);
+    for (Map.Entry<?, ?> entry : map.entrySet()) {
+      String key = validateKey(String.valueOf(entry.getKey()));
+      Object v = entry.getValue();
+      if (v instanceof Map) {
+        Map<?, ?> sub = (Map<?, ?>) v;
+        if (sub.isEmpty()) {
+          lines.add(indent + key + ": {}");
+        } else {
+          lines.add(indent + key + ":");
+          encodeMap(sub, depth + 1, lines);
+        }
+      } else if (v instanceof List) {
+        List<?> sub = (List<?>) v;
+        if (sub.isEmpty()) {
+          lines.add(indent + key + ": []");
+        } else {
+          lines.add(indent + key + ":");
+          encodeList(sub, depth + 1, lines);
+        }
+      } else if (v instanceof String) {
+        String s = (String) v;
+        if (s.contains("\n") || s.contains("\r")) {
+          lines.add(indent + key + ": |");
+          for (String line : s.split("\\R")) {
+            lines.add(indent + "  " + line);
+          }
+          lines.add(indent + "|");
+        } else if (s.isEmpty()) {
+          lines.add(indent + key + ":");
+        } else if (s.startsWith("!") || s.equals("[]") || s.equals("{}") || s.startsWith("|")) {
+          lines.add(indent + key + ": !s " + s);
+        } else {
+          lines.add(indent + key + ": " + s);
+        }
+      } else if (v instanceof Boolean) {
+        lines.add(indent + key + ": !b " + (((Boolean) v) ? "true" : "false"));
+      } else if (v instanceof Long || v instanceof Integer || v instanceof Short || v instanceof Byte) {
+        lines.add(indent + key + ": !i " + v);
+      } else if (v instanceof Double || v instanceof Float) {
+        String s = String.valueOf(v);
+        if (!s.contains(".") && !s.contains("e") && !s.contains("E")) {
+          s += ".0";
+        }
+        lines.add(indent + key + ": !f " + s);
+      } else if (v instanceof byte[]) {
+        lines.add(indent + key + ": !xb " + hexEncode((byte[]) v).toUpperCase());
+      } else if (v instanceof Tagged) {
+        Tagged t = (Tagged) v;
+        if (t.value.contains("\n") || t.value.contains("\r")) {
+          lines.add(indent + key + ": !" + t.tag + " |");
+          for (String line : t.value.split("\\R")) {
+            lines.add(indent + "  " + line);
+          }
+          lines.add(indent + "|");
+        } else {
+          lines.add(indent + key + ": !" + t.tag + " " + t.value);
+        }
+      } else if (v == null) {
+        lines.add(indent + key + ":");
+      } else {
+        throw new Error("unsupported value type: " + v.getClass().getName() + " for key '" + key + "'");
+      }
+    }
+  }
+
+  private static void encodeList(List<?> items, int depth, List<String> lines) {
+    if (depth > MAX_DEPTH) throw new Error("nesting depth exceeds limit");
+    String indent = "  ".repeat(depth);
+    for (Object v : items) {
+      if (v instanceof Map) {
+        Map<?, ?> sub = (Map<?, ?>) v;
+        if (sub.isEmpty()) {
+          lines.add(indent + "- {}");
+        } else {
+          lines.add(indent + "-");
+          encodeMap(sub, depth + 1, lines);
+        }
+      } else if (v instanceof List) {
+        List<?> sub = (List<?>) v;
+        if (sub.isEmpty()) {
+          lines.add(indent + "- []");
+        } else {
+          lines.add(indent + "-");
+          encodeList(sub, depth + 1, lines);
+        }
+      } else if (v instanceof String) {
+        String s = (String) v;
+        if (s.contains("\n") || s.contains("\r")) {
+          lines.add(indent + "- |");
+          for (String line : s.split("\\R")) {
+            lines.add(indent + "  " + line);
+          }
+          lines.add(indent + "|");
+        } else if (s.isEmpty()) {
+          lines.add(indent + "-");
+        } else if (s.startsWith("!") || s.equals("[]") || s.equals("{}") || s.startsWith("|")) {
+          lines.add(indent + "- !s " + s);
+        } else {
+          lines.add(indent + "- " + s);
+        }
+      } else if (v instanceof Boolean) {
+        lines.add(indent + "- !b " + (((Boolean) v) ? "true" : "false"));
+      } else if (v instanceof Long || v instanceof Integer || v instanceof Short || v instanceof Byte) {
+        lines.add(indent + "- !i " + v);
+      } else if (v instanceof Double || v instanceof Float) {
+        String s = String.valueOf(v);
+        if (!s.contains(".") && !s.contains("e") && !s.contains("E")) {
+          s += ".0";
+        }
+        lines.add(indent + "- !f " + s);
+      } else if (v instanceof byte[]) {
+        lines.add(indent + "- !xb " + hexEncode((byte[]) v).toUpperCase());
+      } else if (v instanceof Tagged) {
+        Tagged t = (Tagged) v;
+        if (t.value.contains("\n") || t.value.contains("\r")) {
+          lines.add(indent + "- !" + t.tag + " |");
+          for (String line : t.value.split("\\R")) {
+            lines.add(indent + "  " + line);
+          }
+          lines.add(indent + "|");
+        } else {
+          lines.add(indent + "- !" + t.tag + " " + t.value);
+        }
+      } else if (v == null) {
+        lines.add(indent + "-");
+      } else {
+        throw new Error("unsupported list item type: " + v.getClass().getName());
+      }
+    }
   }
 }

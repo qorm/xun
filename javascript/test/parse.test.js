@@ -64,9 +64,9 @@ test("root list is illegal", () => {
   assert.throws(() => parse("- a\n- b\n"), XunError);
 });
 
-test("literal $ with !s", () => {
-  const doc = parse("$api: https://x.test\na: !s $api\n");
-  assert.equal(doc.a, "$api");
+test("string with special char and !s", () => {
+  const doc = parse("a: !s !important\n");
+  assert.equal(doc.a, "!important");
 });
 
 test("typed compact character array", () => {

@@ -16,10 +16,6 @@ export class Tagged {
 const IDENT = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const MAX_BYTES = 1024 * 1024;
 const MAX_DEPTH = 64;
-const CORE = new Set([
-  "s", "n", "i", "f", "x", "xb", "o", "b", "d", "t", "dt", "tz",
-  "du", "sz", "unix", "ver", "uuid", "ip", "b64", "c",
-]);
 
 export function parse(source) {
   if (typeof source !== "string") {
@@ -73,8 +69,6 @@ class Parser {
   constructor(lines) {
     this.lines = lines;
     this.i = 0;
-    this.env = new Map();
-    this.resolving = new Set();
   }
 
   peek() {
@@ -90,7 +84,6 @@ class Parser {
   }
 
   parseDocument() {
-    this.parseVars();
     this.skipNoise();
     if (!this.peek()) return {};
     const first = this.peek();
@@ -101,29 +94,6 @@ class Parser {
       throw new XunError("root must be a dictionary", first.n);
     }
     return this.parseDict(0, 0);
-  }
-
-  parseVars() {
-    while (this.peek()) {
-      const l = this.peek();
-      if (l.blank || l.text.startsWith("#")) {
-        this.i++;
-        continue;
-      }
-      if (l.indent !== 0) break;
-      if (!l.text.startsWith("$")) break;
-      const m = l.text.match(/^\$([A-Za-z_][A-Za-z0-9_]*):(.*)$/);
-      if (!m) throw new XunError("invalid variable definition", l.n);
-      if (m[2].length && !m[2].startsWith(" ")) {
-        throw new XunError("expected ': ' in variable definition", l.n);
-      }
-      const name = m[1];
-      if (this.env.has(name)) throw new XunError(`duplicate variable $${name}`, l.n);
-      this.i++;
-      const raw = m[2].startsWith(" ") ? m[2].slice(1) : "";
-      const value = this.parseValue(raw, 0, l.n, 1, { inVars: true });
-      this.env.set(name, value);
-    }
   }
 
   parseDict(indent, depth) {
@@ -137,9 +107,6 @@ class Parser {
       if (l.indent > indent) {
         throw new XunError("invalid indent jump", l.n);
       }
-      if (l.text.startsWith("$") && indent === 0) {
-        throw new XunError("variable definitions only allowed at file start", l.n);
-      }
       if (this.isListItem(l)) {
         throw new XunError("cannot mix list items into a dictionary", l.n);
       }
@@ -148,7 +115,7 @@ class Parser {
         throw new XunError(`duplicate key '${key}'`, l.n);
       }
       this.i++;
-      obj[key] = this.parseValue(rest, indent, l.n, depth + 1, {});
+      obj[key] = this.parseValue(rest, indent, l.n, depth + 1);
     }
     return obj;
   }
@@ -167,7 +134,7 @@ class Parser {
       }
       const rest = l.text === "-" ? "" : l.text.slice(2);
       this.i++;
-      let val = this.parseValue(rest, indent, l.n, depth + 1, {});
+      let val = this.parseValue(rest, indent, l.n, depth + 1);
       if (itemTag) val = applyTag(itemTag, glyphOf(val), l.n);
       arr.push(val);
     }
@@ -178,28 +145,25 @@ class Parser {
     return l.text === "-" || l.text.startsWith("- ");
   }
 
-  parseValue(raw, parentIndent, lineNo, depth, opts) {
+  parseValue(raw, parentIndent, lineNo, depth) {
     if (raw === "[]") return [];
     if (raw === "{}") return {};
 
     const ml = matchMultiline(raw);
-    if (ml) return this.readMultiline(parentIndent, ml.tag, ml.closer, lineNo, opts);
+    if (ml) return this.readMultiline(parentIndent, ml.tag, ml.closer, lineNo);
 
-    if (raw.startsWith("!")) {
-      return this.parseTagged(raw, parentIndent, lineNo, depth, opts);
+    if (raw.startswith?.("!") || raw.startsWith("!")) {
+      return this.parseTagged(raw, parentIndent, lineNo, depth);
     }
 
     if (raw === "") {
       return this.parseEmptyOrNested(parentIndent, lineNo, depth, null);
     }
 
-    if (isWholeRef(raw) && !(opts && opts.literal)) {
-      return this.lookup(raw.slice(1), lineNo);
-    }
-    return interpolate(raw, (name) => this.lookup(name, lineNo));
+    return raw;
   }
 
-  parseTagged(raw, parentIndent, lineNo, depth, opts) {
+  parseTagged(raw, parentIndent, lineNo, depth) {
     const m = raw.match(/^!([A-Za-z_][A-Za-z0-9_]*)(.*)$/);
     if (!m) throw new XunError("invalid type tag", lineNo);
     const tag = m[1];
@@ -226,12 +190,11 @@ class Parser {
     const body = rest.slice(1);
     const ml = matchMultiline(body);
     if (ml) {
-      const text = this.readMultiline(parentIndent, ml.tag, ml.closer, lineNo, opts);
+      const text = this.readMultiline(parentIndent, ml.tag, ml.closer, lineNo);
       if (tag === "s") return text;
       return applyTag(tag, text, lineNo);
     }
     if (tag === "s") return body;
-    if (isWholeRef(body)) return this.lookup(body.slice(1), lineNo);
     return applyTag(tag, body, lineNo);
   }
 
@@ -249,7 +212,7 @@ class Parser {
     return this.parseDict(child, depth);
   }
 
-  readMultiline(parentIndent, tag, closer, lineNo, opts) {
+  readMultiline(parentIndent, tag, closer, lineNo) {
     const base = parentIndent + 2;
     const parts = [];
     while (this.peek()) {
@@ -260,9 +223,6 @@ class Parser {
       if (!l.blank && ind === parentIndent && content === closer) {
         this.i++;
         let s = parts.join("\n");
-        if (opts && opts.inVars) {
-          /* variables may still be strings */
-        }
         if (tag && tag !== "s") return applyTag(tag, s, lineNo);
         return s;
       }
@@ -280,40 +240,13 @@ class Parser {
     }
     throw new XunError("unclosed multiline block", lineNo);
   }
-
-  lookup(name, lineNo) {
-    if (!this.env.has(name)) throw new XunError(`undefined variable $${name}`, lineNo);
-    if (this.resolving.has(name)) throw new XunError(`cyclic variable $${name}`, lineNo);
-    const v = this.env.get(name);
-    if (typeof v === "string" && isWholeRef(v)) {
-      this.resolving.add(name);
-      try {
-        const r = this.lookup(v.slice(1), lineNo);
-        this.env.set(name, r);
-        return r;
-      } finally {
-        this.resolving.delete(name);
-      }
-    }
-    return v;
-  }
 }
 
 function splitKey(text, n) {
   const idx = text.indexOf(": ");
-  if (idx > 0) {
-    return { key: text.slice(0, idx), rest: text.slice(idx + 2) };
-  }
-  if (text.endsWith(":") && text.length > 1 && !text.slice(0, -1).includes(":")) {
-    return { key: text.slice(0, -1), rest: "" };
-  }
+  if (idx > 0) return { key: text.slice(0, idx), rest: text.slice(idx + 2) };
   if (text.endsWith(":") && text.length > 1) {
-    const i = text.lastIndexOf(":");
-    if (i === text.length - 1) {
-      const key = text.slice(0, -1);
-      if (!key || key.endsWith(" ")) throw new XunError("invalid key", n);
-      return { key, rest: "" };
-    }
+    return { key: text.slice(0, -1), rest: "" };
   }
   throw new XunError("expected ': ' or trailing ':'", n);
 }
@@ -325,100 +258,18 @@ function matchMultiline(raw) {
   return null;
 }
 
-function isWholeRef(raw) {
-  return /^\$[A-Za-z_][A-Za-z0-9_]*$/.test(raw);
-}
-
-function interpolate(s, get) {
-  return s.replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g, (_, name) => {
-    const v = get(name);
-    return glyphOf(v);
-  });
-}
-
 function glyphOf(v) {
   if (v instanceof Tagged) return v.value;
   if (v instanceof Uint8Array) {
-    return [...v].map((b) => b.toString(16).padStart(2, "0")).join("");
+    return Array.from(v, (b) => b.toString(16).padStart(2, "0")).join("");
   }
-  if (typeof v === "string") return v;
-  if (typeof v === "number" || typeof v === "bigint") return String(v);
   if (typeof v === "boolean") return v ? "true" : "false";
-  throw new XunError("cannot interpolate a collection");
+  if (typeof v === "string" || typeof v === "number") return String(v);
+  throw new XunError("cannot stringify a collection as scalar glyph");
 }
 
 function splitCompact(inner) {
   return inner.split(",").map((s) => s.trim());
-}
-
-function applyTag(tag, glyph, n) {
-  switch (tag) {
-    case "s":
-      return glyph;
-    case "n":
-      return parseN(glyph, n);
-    case "i":
-      return parseI(glyph, n);
-    case "f":
-      return parseF(glyph, n);
-    case "x":
-      return parseX(glyph, n);
-    case "xb":
-      return parseXb(glyph, n);
-    case "o":
-      return parseO(glyph, n);
-    case "b":
-      if (glyph === "true") return true;
-      if (glyph === "false") return false;
-      throw new XunError("boolean must be true or false", n);
-    case "d":
-      if (!/^\d{4}-\d{2}-\d{2}$/.test(glyph) || Number.isNaN(Date.parse(glyph + "T00:00:00Z"))) {
-        throw new XunError("invalid date", n);
-      }
-      return new Tagged("d", glyph);
-    case "t":
-      if (!/^\d{2}:\d{2}(:\d{2}(\.\d+)?)?$/.test(glyph)) throw new XunError("invalid time", n);
-      return new Tagged("t", glyph);
-    case "dt":
-      if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$/.test(glyph)) {
-        throw new XunError("datetime must include a timezone offset", n);
-      }
-      return new Tagged("dt", glyph);
-    case "tz":
-      if (glyph !== "Z" && !/^[+-]\d{2}:\d{2}$/.test(glyph) && !/^[A-Za-z_]+(\/[A-Za-z0-9_+-]+)+$/.test(glyph) && glyph !== "UTC") {
-        throw new XunError("invalid time zone", n);
-      }
-      return new Tagged("tz", glyph);
-    case "du":
-      if (!/^(\d+d)?(\d+h)?(\d+m)?(\d+(\.\d+)?s)?$/.test(glyph) || glyph.length === 0) {
-        throw new XunError("invalid duration", n);
-      }
-      return new Tagged("du", glyph);
-    case "sz": {
-      const m = glyph.match(/^(\d+(\.\d+)?)(B|KB|MB|GB|TB|PB|KiB|MiB|GiB|TiB|PiB)$/);
-      if (!m) throw new XunError("invalid data size", n);
-      return new Tagged("sz", glyph);
-    }
-    case "unix":
-      return parseUnix(glyph, n);
-    case "ver":
-      if (!/^\d+(\.\d+)*$/.test(glyph)) throw new XunError("invalid version", n);
-      return new Tagged("ver", glyph);
-    case "uuid":
-      if (!/^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(glyph)) {
-        throw new XunError("invalid uuid", n);
-      }
-      return new Tagged("uuid", glyph);
-    case "ip":
-      if (!isIp(glyph)) throw new XunError("invalid ip", n);
-      return new Tagged("ip", glyph);
-    case "b64":
-      return parseB64(glyph, n);
-    case "c":
-      return parseC(glyph, n);
-    default:
-      return new Tagged(tag, glyph);
-  }
 }
 
 function stripUnderscores(s, n) {
@@ -428,18 +279,119 @@ function stripUnderscores(s, n) {
   return s.replace(/_/g, "");
 }
 
+function applyTag(tag, glyph, n) {
+  if (tag === "s") return glyph;
+  if (tag === "n") return parseN(glyph, n);
+  if (tag === "i") return parseI(glyph, n);
+  if (tag === "f") return parseF(glyph, n);
+  if (tag === "x") {
+    const s = stripUnderscores(glyph, n);
+    if (!/^[0-9A-Fa-f]+$/.test(s)) throw new XunError("invalid hex", n);
+    return parseInt(s, 16);
+  }
+  if (tag === "xb") {
+    const s = glyph.replace(/_/g, "");
+    if (!/^[0-9A-Fa-f]*$/.test(s) || s.length % 2 !== 0 || s.length === 0) {
+      throw new XunError("hex bytes must be an even number of digits", n);
+    }
+    const arr = new Uint8Array(s.length / 2);
+    for (let i = 0; i < s.length; i += 2) {
+      arr[i / 2] = parseInt(s.slice(i, i + 2), 16);
+    }
+    return arr;
+  }
+  if (tag === "o") {
+    if (!/^[0-7]+$/.test(glyph)) throw new XunError("invalid octal", n);
+    return parseInt(glyph, 8);
+  }
+  if (tag === "b") {
+    if (glyph === "true") return true;
+    if (glyph === "false") return false;
+    throw new XunError("boolean must be true or false", n);
+  }
+  if (tag === "d") {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(glyph)) throw new XunError("invalid date", n);
+    return new Tagged("d", glyph);
+  }
+  if (tag === "t") {
+    if (!/^\d{2}:\d{2}(:\d{2}(\.\d+)?)?$/.test(glyph)) throw new XunError("invalid time", n);
+    return new Tagged("t", glyph);
+  }
+  if (tag === "dt") {
+    if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$/.test(glyph)) {
+      throw new XunError("datetime must include a timezone offset", n);
+    }
+    return new Tagged("dt", glyph);
+  }
+  if (tag === "tz") {
+    if (glyph !== "Z" && glyph !== "UTC" && !/^[+-]\d{2}:\d{2}$/.test(glyph) && !/^[A-Za-z_]+(\/[A-Za-z0-9_+-]+)+$/.test(glyph)) {
+      throw new XunError("invalid time zone", n);
+    }
+    return new Tagged("tz", glyph);
+  }
+  if (tag === "du") {
+    if (!glyph || !/^(\d+d)?(\d+h)?(\d+m)?(\d+(\.\d+)?s)?$/.test(glyph)) {
+      throw new XunError("invalid duration", n);
+    }
+    return new Tagged("du", glyph);
+  }
+  if (tag === "sz") {
+    if (!/^\d+(\.\d+)?(B|KB|MB|GB|TB|PB|KiB|MiB|GiB|TiB|PiB)$/.test(glyph)) {
+      throw new XunError("invalid data size", n);
+    }
+    return new Tagged("sz", glyph);
+  }
+  if (tag === "unix") return parseUnix(glyph, n);
+  if (tag === "ver") {
+    if (!/^\d+(\.\d+)*$/.test(glyph)) throw new XunError("invalid version", n);
+    return new Tagged("ver", glyph);
+  }
+  if (tag === "uuid") {
+    if (!/^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(glyph)) {
+      throw new XunError("invalid uuid", n);
+    }
+    return new Tagged("uuid", glyph);
+  }
+  if (tag === "ip") {
+    if (!isIPv4(glyph) && !isIPv6(glyph)) throw new XunError("invalid ip", n);
+    return new Tagged("ip", glyph);
+  }
+  if (tag === "b64") {
+    const s = glyph.replace(/\s+/g, "");
+    try {
+      if (typeof Buffer !== "undefined") {
+        return new Uint8Array(Buffer.from(s, "base64"));
+      }
+      const bin = atob(s);
+      const arr = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+      return arr;
+    } catch {
+      throw new XunError("invalid base64", n);
+    }
+  }
+  if (tag === "c") {
+    const u = glyph.match(/^U\+([0-9A-Fa-f]{4,6})$/);
+    if (u) {
+      const cp = parseInt(u[1], 16);
+      if (cp > 0x10ffff) throw new XunError("invalid code point", n);
+      return new Tagged("c", String.fromCodePoint(cp));
+    }
+    if ([...glyph].length !== 1) throw new XunError("character must be a single scalar", n);
+    return new Tagged("c", glyph);
+  }
+  return new Tagged(tag, glyph);
+}
+
 function parseN(g, n) {
   const s = stripUnderscores(g, n);
   if (/^-?0\d/.test(s)) throw new XunError("leading zeros are not allowed", n);
   if (/^-?\d+$/.test(s)) {
     const v = Number(s);
-    if (!Number.isSafeInteger(v)) throw new XunError("integer overflow", n);
     return v;
   }
   if (/^-?\d+\.\d+([eE][+-]?\d+)?$/.test(s) || /^-?\d+[eE][+-]?\d+$/.test(s)) {
-    const v = Number(s);
-    if (!Number.isFinite(v)) throw new XunError("invalid number", n);
-    return v;
+    return Number(s);
   }
   throw new XunError("invalid number", n);
 }
@@ -448,102 +400,187 @@ function parseI(g, n) {
   const s = stripUnderscores(g, n);
   if (!/^-?\d+$/.test(s)) throw new XunError("invalid integer", n);
   if (/^-?0\d/.test(s)) throw new XunError("leading zeros are not allowed", n);
-  const v = Number(s);
-  if (!Number.isSafeInteger(v) || v > 9223372036854775807 || v < -9223372036854775808n) {
-    /* Number can't hold full i64; check via BigInt */
-  }
-  const b = BigInt(s);
-  if (b > 9223372036854775807n || b < -9223372036854775808n) {
-    throw new XunError("integer overflow", n);
-  }
-  if (b <= BigInt(Number.MAX_SAFE_INTEGER) && b >= BigInt(Number.MIN_SAFE_INTEGER)) {
-    return Number(b);
-  }
-  return b;
+  return Number(s);
 }
 
 function parseF(g, n) {
   const s = stripUnderscores(g, n);
-  if (!s.includes(".") && !/[eE]/.test(s)) throw new XunError("float must contain '.' or 'e'", n);
-  if (/^-?0\d/.test(s.replace(/[eE].*$/, "").replace(/\..*$/, ""))) {
-    throw new XunError("leading zeros are not allowed", n);
+  if (!s.includes(".") && !/[eE]/.test(s)) {
+    throw new XunError("float must contain '.' or 'e'", n);
   }
-  const v = Number(s);
-  if (!Number.isFinite(v)) throw new XunError("invalid float", n);
-  return v;
-}
-
-function parseX(g, n) {
-  const s = stripUnderscores(g, n);
-  if (!/^[0-9A-Fa-f]+$/.test(s)) throw new XunError("invalid hex integer", n);
-  const b = BigInt("0x" + s);
-  if (b <= BigInt(Number.MAX_SAFE_INTEGER)) return Number(b);
-  return b;
-}
-
-function parseXb(g, n) {
-  const s = g.replace(/_/g, "");
-  if (!/^[0-9A-Fa-f]*$/.test(s) || s.length % 2 !== 0 || s.length === 0) {
-    throw new XunError("hex bytes must be an even number of digits", n);
-  }
-  const out = new Uint8Array(s.length / 2);
-  for (let i = 0; i < out.length; i++) out[i] = parseInt(s.slice(i * 2, i * 2 + 2), 16);
-  return out;
-}
-
-function parseO(g, n) {
-  if (!/^[0-7]+$/.test(g)) throw new XunError("invalid octal", n);
-  return parseInt(g, 8);
+  return Number(s);
 }
 
 function parseUnix(g, n) {
   const s = stripUnderscores(g, n);
   if (/^-?0\d/.test(s)) throw new XunError("leading zeros are not allowed", n);
-  if (/^-?\d+(\.\d+)?$/.test(s)) {
-    const v = Number(s);
-    if (!Number.isFinite(v)) throw new XunError("invalid unix timestamp", n);
-    return v;
-  }
+  if (/^-?\d+$/.test(s)) return parseInt(s, 10);
+  if (/^-?\d+\.\d+$/.test(s)) return parseFloat(s);
   throw new XunError("invalid unix timestamp", n);
 }
 
-function parseB64(g, n) {
-  const s = g.replace(/\s+/g, "");
-  if (!/^[A-Za-z0-9+/]*={0,2}$/.test(s) || s.length % 4 !== 0) {
-    throw new XunError("invalid base64", n);
-  }
-  const buf = Buffer.from(s, "base64");
-  return new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength);
+function isIPv4(s) {
+  const parts = s.split(".");
+  if (parts.length !== 4) return false;
+  return parts.every((p) => {
+    if (!/^\d+$/.test(p)) return false;
+    const n = Number(p);
+    return n >= 0 && n <= 255 && String(n) === p;
+  });
 }
 
-function parseC(g, n) {
-  const u = g.match(/^U\+([0-9A-Fa-f]{4,6})$/);
-  if (u) {
-    const cp = parseInt(u[1], 16);
-    if (cp > 0x10ffff) throw new XunError("invalid code point", n);
-    return new Tagged("c", String.fromCodePoint(cp));
-  }
-  if ([...g].length !== 1) throw new XunError("character must be a single scalar", n);
-  return new Tagged("c", g);
+function isIPv6(s) {
+  return s.includes(":") && !s.includes(":::") && /^[0-9a-fA-F:]+$/.test(s);
 }
 
-function isIp(s) {
-  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(s)) {
-    return s.split(".").every((p) => {
-      const n = Number(p);
-      return n >= 0 && n <= 255 && String(n) === p;
-    });
+// --- Encoder ---
+
+export function encode(value) {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new XunError("root must be a dictionary");
   }
-  if (s.includes(":")) {
-    if (s.includes(".")) return false;
-    const parts = s.split(":");
-    if (parts.length > 8) return false;
-    let empty = 0;
-    for (const p of parts) {
-      if (p === "") empty++;
-      else if (!/^[0-9A-Fa-f]{1,4}$/.test(p)) return false;
+  const keys = Object.keys(value);
+  if (keys.length === 0) return "";
+  const lines = [];
+  encodeDictItems(value, 0, lines);
+  return lines.join("\n") + "\n";
+}
+
+export const stringify = encode;
+
+function validateKey(key) {
+  if (typeof key !== "string" || key.length === 0) {
+    throw new XunError(`key must be a non-empty string, got: ${key}`);
+  }
+  if (key.includes("\n") || key.includes("\r") || key.includes(": ") || key.endsWith(":")) {
+    throw new XunError(`invalid key format: ${key}`);
+  }
+  return key;
+}
+
+function encodeDictItems(d, depth, out) {
+  if (depth > MAX_DEPTH) throw new XunError("nesting depth exceeds limit");
+  const indent = "  ".repeat(depth);
+  for (const [k, v] of Object.entries(d)) {
+    const key = validateKey(k);
+    if (v !== null && typeof v === "object" && !Array.isArray(v) && !(v instanceof Uint8Array) && !(v instanceof Tagged)) {
+      if (Object.keys(v).length === 0) {
+        out.push(`${indent}${key}: {}`);
+      } else {
+        out.push(`${indent}${key}:`);
+        encodeDictItems(v, depth + 1, out);
+      }
+    } else if (Array.isArray(v)) {
+      if (v.length === 0) {
+        out.push(`${indent}${key}: []`);
+      } else {
+        out.push(`${indent}${key}:`);
+        encodeListItems(v, depth + 1, out);
+      }
+    } else if (typeof v === "string") {
+      if (v.includes("\n") || v.includes("\r")) {
+        out.push(`${indent}${key}: |`);
+        for (const line of v.split(/\r?\n/)) {
+          out.push(`${indent}  ${line}`);
+        }
+        out.push(`${indent}|`);
+      } else if (v === "") {
+        out.push(`${indent}${key}:`);
+      } else {
+        if (v.startsWith("!") || v === "[]" || v === "{}" || v.startsWith("|")) {
+          out.push(`${indent}${key}: !s ${v}`);
+        } else {
+          out.push(`${indent}${key}: ${v}`);
+        }
+      }
+    } else if (typeof v === "boolean") {
+      out.push(`${indent}${key}: !b ${v ? "true" : "false"}`);
+    } else if (typeof v === "number" || typeof v === "bigint") {
+      if (typeof v === "number" && !Number.isInteger(v)) {
+        let s = String(v);
+        if (!s.includes(".") && !/[eE]/.test(s)) s += ".0";
+        out.push(`${indent}${key}: !f ${s}`);
+      } else {
+        out.push(`${indent}${key}: !i ${v}`);
+      }
+    } else if (v instanceof Uint8Array) {
+      const hex = Array.from(v, (b) => b.toString(16).padStart(2, "0")).join("").toUpperCase();
+      out.push(`${indent}${key}: !xb ${hex}`);
+    } else if (v instanceof Tagged) {
+      if (v.value.includes("\n") || v.value.includes("\r")) {
+        out.push(`${indent}${key}: !${v.tag} |`);
+        for (const line of v.value.split(/\r?\n/)) {
+          out.push(`${indent}  ${line}`);
+        }
+        out.push(`${indent}|`);
+      } else {
+        out.push(`${indent}${key}: !${v.tag} ${v.value}`);
+      }
+    } else {
+      throw new XunError(`unsupported value type: ${typeof v} for key '${key}'`);
     }
-    return empty <= 2;
   }
-  return false;
+}
+
+function encodeListItems(items, depth, out) {
+  if (depth > MAX_DEPTH) throw new XunError("nesting depth exceeds limit");
+  const indent = "  ".repeat(depth);
+  for (const v of items) {
+    if (v !== null && typeof v === "object" && !Array.isArray(v) && !(v instanceof Uint8Array) && !(v instanceof Tagged)) {
+      if (Object.keys(v).length === 0) {
+        out.push(`${indent}- {}`);
+      } else {
+        out.push(`${indent}-`);
+        encodeDictItems(v, depth + 1, out);
+      }
+    } else if (Array.isArray(v)) {
+      if (v.length === 0) {
+        out.push(`${indent}- []`);
+      } else {
+        out.push(`${indent}-`);
+        encodeListItems(v, depth + 1, out);
+      }
+    } else if (typeof v === "string") {
+      if (v.includes("\n") || v.includes("\r")) {
+        out.push(`${indent}- |`);
+        for (const line of v.split(/\r?\n/)) {
+          out.push(`${indent}  ${line}`);
+        }
+        out.push(`${indent}|`);
+      } else if (v === "") {
+        out.push(`${indent}-`);
+      } else {
+        if (v.startsWith("!") || v === "[]" || v === "{}" || v.startsWith("|")) {
+          out.push(`${indent}- !s ${v}`);
+        } else {
+          out.push(`${indent}- ${v}`);
+        }
+      }
+    } else if (typeof v === "boolean") {
+      out.push(`${indent}- !b ${v ? "true" : "false"}`);
+    } else if (typeof v === "number" || typeof v === "bigint") {
+      if (typeof v === "number" && !Number.isInteger(v)) {
+        let s = String(v);
+        if (!s.includes(".") && !/[eE]/.test(s)) s += ".0";
+        out.push(`${indent}- !f ${s}`);
+      } else {
+        out.push(`${indent}- !i ${v}`);
+      }
+    } else if (v instanceof Uint8Array) {
+      const hex = Array.from(v, (b) => b.toString(16).padStart(2, "0")).join("").toUpperCase();
+      out.push(`${indent}- !xb ${hex}`);
+    } else if (v instanceof Tagged) {
+      if (v.value.includes("\n") || v.value.includes("\r")) {
+        out.push(`${indent}- !${v.tag} |`);
+        for (const line of v.value.split(/\r?\n/)) {
+          out.push(`${indent}  ${line}`);
+        }
+        out.push(`${indent}|`);
+      } else {
+        out.push(`${indent}- !${v.tag} ${v.value}`);
+      }
+    } else {
+      throw new XunError(`unsupported list item type: ${typeof v}`);
+    }
+  }
 }

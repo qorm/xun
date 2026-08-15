@@ -5,7 +5,9 @@ import (
 	"encoding/hex"
 	"fmt"
 	"net"
+	"reflect"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -45,10 +47,8 @@ type line struct {
 }
 
 type parser struct {
-	lines     []line
-	i         int
-	env       map[string]any
-	resolving map[string]bool
+	lines []line
+	i     int
 }
 
 func Parse(source string) (doc any, err error) {
@@ -69,7 +69,7 @@ func Parse(source string) (doc any, err error) {
 		fail(0, "document exceeds 1MB")
 	}
 	source = strings.TrimPrefix(source, "\ufeff")
-	p := &parser{lines: splitLines(source), env: map[string]any{}, resolving: map[string]bool{}}
+	p := &parser{lines: splitLines(source)}
 	return p.parseDocument(), nil
 }
 
@@ -133,7 +133,6 @@ func (p *parser) skipNoise() {
 }
 
 func (p *parser) parseDocument() any {
-	p.parseVars()
 	p.skipNoise()
 	if p.peek() == nil {
 		return map[string]any{}
@@ -146,38 +145,6 @@ func (p *parser) parseDocument() any {
 		fail(first.n, "root must be a dictionary")
 	}
 	return p.parseDict(0, 0)
-}
-
-var varDef = regexp.MustCompile(`^\$([A-Za-z_][A-Za-z0-9_]*):(.*)$`)
-
-func (p *parser) parseVars() {
-	for p.peek() != nil {
-		l := p.peek()
-		if l.blank || strings.HasPrefix(l.text, "#") {
-			p.i++
-			continue
-		}
-		if l.indent != 0 || !strings.HasPrefix(l.text, "$") {
-			break
-		}
-		m := varDef.FindStringSubmatch(l.text)
-		if m == nil {
-			fail(l.n, "invalid variable definition")
-		}
-		if m[2] != "" && !strings.HasPrefix(m[2], " ") {
-			fail(l.n, "expected ': ' in variable definition")
-		}
-		name := m[1]
-		if _, ok := p.env[name]; ok {
-			fail(l.n, "duplicate variable $%s", name)
-		}
-		p.i++
-		raw := ""
-		if strings.HasPrefix(m[2], " ") {
-			raw = m[2][1:]
-		}
-		p.env[name] = p.parseValue(raw, 0, l.n, 1)
-	}
 }
 
 func (p *parser) parseDict(indent, depth int) map[string]any {
@@ -200,9 +167,6 @@ func (p *parser) parseDict(indent, depth int) map[string]any {
 		}
 		if l.indent > indent {
 			fail(l.n, "invalid indent jump")
-		}
-		if strings.HasPrefix(l.text, "$") && indent == 0 {
-			fail(l.n, "variable definitions only allowed at file start")
 		}
 		if p.isListItem(l) {
 			fail(l.n, "cannot mix list items into a dictionary")
@@ -274,10 +238,7 @@ func (p *parser) parseValue(raw string, parentIndent, lineNo, depth int) any {
 	if raw == "" {
 		return p.parseEmptyOrNested(parentIndent, lineNo, depth, "")
 	}
-	if isWholeRef(raw) {
-		return p.lookup(raw[1:], lineNo)
-	}
-	return interpolate(raw, func(name string) any { return p.lookup(name, lineNo) })
+	return raw
 }
 
 var tagRe = regexp.MustCompile(`^!([A-Za-z_][A-Za-z0-9_]*)(.*)$`)
@@ -322,9 +283,6 @@ func (p *parser) parseTagged(raw string, parentIndent, lineNo, depth int) any {
 	}
 	if tag == "s" {
 		return body
-	}
-	if isWholeRef(body) {
-		return p.lookup(body[1:], lineNo)
 	}
 	return applyTag(tag, body, lineNo)
 }
@@ -372,44 +330,23 @@ func (p *parser) readMultiline(parentIndent int, tag, closer string, lineNo int)
 			p.i++
 			continue
 		}
-		if ind < base {
+		if ind < base && !l.blank {
 			fail(l.n, "multiline body must indent +2, or close at opener indent")
 		}
 		if strings.Contains(l.raw, "\t") {
 			fail(l.n, "tab is not allowed")
 		}
-		if len(l.raw) < base {
-			parts = append(parts, "")
-		} else {
-			parts = append(parts, l.raw[base:])
-		}
+		parts = append(parts, l.raw[base:])
 		p.i++
 	}
 	fail(lineNo, "unclosed multiline block")
-	return ""
-}
-
-func (p *parser) lookup(name string, lineNo int) any {
-	v, ok := p.env[name]
-	if !ok {
-		fail(lineNo, "undefined variable $%s", name)
-	}
-	if p.resolving[name] {
-		fail(lineNo, "cyclic variable $%s", name)
-	}
-	if s, ok := v.(string); ok && isWholeRef(s) {
-		p.resolving[name] = true
-		defer delete(p.resolving, name)
-		r := p.lookup(s[1:], lineNo)
-		p.env[name] = r
-		return r
-	}
-	return v
+	return nil
 }
 
 func splitKey(text string, n int) (string, string) {
-	if i := strings.Index(text, ": "); i > 0 {
-		return text[:i], text[i+2:]
+	idx := strings.Index(text, ": ")
+	if idx > 0 {
+		return text[:idx], text[idx+2:]
 	}
 	if strings.HasSuffix(text, ":") && len(text) > 1 {
 		return text[:len(text)-1], ""
@@ -418,62 +355,67 @@ func splitKey(text string, n int) (string, string) {
 	return "", ""
 }
 
-var taggedCloser = regexp.MustCompile(`^\|([A-Za-z_][A-Za-z0-9_]*)$`)
+var mlRe = regexp.MustCompile(`^\|([A-Za-z_][A-Za-z0-9_]*)$`)
 
 func matchMultiline(raw string) (string, bool) {
 	if raw == "|" {
 		return "|", true
 	}
-	if m := taggedCloser.FindStringSubmatch(raw); m != nil {
+	m := mlRe.FindStringSubmatch(raw)
+	if m != nil {
 		return m[1], true
 	}
 	return "", false
 }
 
-func isWholeRef(raw string) bool {
-	ok, _ := regexp.MatchString(`^\$[A-Za-z_][A-Za-z0-9_]*$`, raw)
-	return ok
-}
-
-var interpRe = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)\}`)
-
-func interpolate(s string, get func(string) any) string {
-	return interpRe.ReplaceAllStringFunc(s, func(m string) string {
-		name := m[2 : len(m)-1]
-		return glyphOf(get(name))
-	})
-}
-
 func glyphOf(v any) string {
-	switch t := v.(type) {
+	switch val := v.(type) {
 	case Tagged:
-		return t.Value
+		return val.Value
 	case []byte:
-		return hex.EncodeToString(t)
-	case string:
-		return t
+		return hex.EncodeToString(val)
 	case bool:
-		if t {
+		if val {
 			return "true"
 		}
 		return "false"
-	case int64:
-		return strconv.FormatInt(t, 10)
-	case float64:
-		return strconv.FormatFloat(t, 'g', -1, 64)
+	case string:
+		return val
+	case int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64, float32, float64:
+		return fmt.Sprintf("%v", val)
 	default:
-		fail(0, "cannot interpolate a collection")
+		fail(0, "cannot stringify a collection as scalar glyph")
 		return ""
 	}
 }
 
 func splitCompact(inner string) []string {
 	parts := strings.Split(inner, ",")
-	for i, p := range parts {
-		parts[i] = strings.TrimSpace(p)
+	for i := range parts {
+		parts[i] = strings.TrimSpace(parts[i])
 	}
 	return parts
 }
+
+func stripUnderscores(s string, n int) string {
+	if strings.Contains(s, "__") || strings.HasPrefix(s, "_") || strings.HasSuffix(s, "_") {
+		fail(n, "invalid numeric underscores")
+	}
+	return strings.ReplaceAll(s, "_", "")
+}
+
+var (
+	dateRe     = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}$`)
+	timeRe     = regexp.MustCompile(`^\d{2}:\d{2}(:\d{2}(\.\d+)?)?$`)
+	dtRe       = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$`)
+	tzOffsetRe = regexp.MustCompile(`^[+-]\d{2}:\d{2}$`)
+	tzNameRe   = regexp.MustCompile(`^[A-Za-z_]+(/[A-Za-z0-9_+-]+)+$`)
+	duRe       = regexp.MustCompile(`^(\d+d)?(\d+h)?(\d+m)?(\d+(\.\d+)?s)?$`)
+	szRe       = regexp.MustCompile(`^\d+(\.\d+)?(B|KB|MB|GB|TB|PB|KiB|MiB|GiB|TiB|PiB)$`)
+	verRe      = regexp.MustCompile(`^\d+(\.\d+)*$`)
+	uuidRe     = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
+	cpRe       = regexp.MustCompile(`^U\+([0-9A-Fa-f]{4,6})$`)
+)
 
 func applyTag(tag, glyph string, n int) any {
 	switch tag {
@@ -486,11 +428,12 @@ func applyTag(tag, glyph string, n int) any {
 	case "f":
 		return parseF(glyph, n)
 	case "x":
-		v, err := strconv.ParseInt(stripUnderscores(glyph, n), 16, 64)
+		s := stripUnderscores(glyph, n)
+		val, err := strconv.ParseInt(s, 16, 64)
 		if err != nil {
-			fail(n, "invalid hex integer")
+			fail(n, "invalid hex")
 		}
-		return v
+		return val
 	case "xb":
 		s := strings.ReplaceAll(glyph, "_", "")
 		b, err := hex.DecodeString(s)
@@ -499,11 +442,11 @@ func applyTag(tag, glyph string, n int) any {
 		}
 		return b
 	case "o":
-		v, err := strconv.ParseInt(glyph, 8, 64)
+		val, err := strconv.ParseInt(glyph, 8, 64)
 		if err != nil {
 			fail(n, "invalid octal")
 		}
-		return v
+		return val
 	case "b":
 		if glyph == "true" {
 			return true
@@ -513,48 +456,44 @@ func applyTag(tag, glyph string, n int) any {
 		}
 		fail(n, "boolean must be true or false")
 	case "d":
-		if ok, _ := regexp.MatchString(`^\d{4}-\d{2}-\d{2}$`, glyph); !ok {
+		if !dateRe.MatchString(glyph) {
 			fail(n, "invalid date")
 		}
 		return Tagged{Tag: "d", Value: glyph}
 	case "t":
-		if ok, _ := regexp.MatchString(`^\d{2}:\d{2}(:\d{2}(\.\d+)?)?$`, glyph); !ok {
+		if !timeRe.MatchString(glyph) {
 			fail(n, "invalid time")
 		}
 		return Tagged{Tag: "t", Value: glyph}
 	case "dt":
-		if ok, _ := regexp.MatchString(`^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$`, glyph); !ok {
+		if !dtRe.MatchString(glyph) {
 			fail(n, "datetime must include a timezone offset")
 		}
 		return Tagged{Tag: "dt", Value: glyph}
 	case "tz":
-		ok1, _ := regexp.MatchString(`^[+-]\d{2}:\d{2}$`, glyph)
-		ok2, _ := regexp.MatchString(`^[A-Za-z_]+(/[A-Za-z0-9_+-]+)+$`, glyph)
-		if glyph != "Z" && glyph != "UTC" && !ok1 && !ok2 {
+		if glyph != "Z" && glyph != "UTC" && !tzOffsetRe.MatchString(glyph) && !tzNameRe.MatchString(glyph) {
 			fail(n, "invalid time zone")
 		}
 		return Tagged{Tag: "tz", Value: glyph}
 	case "du":
-		ok, _ := regexp.MatchString(`^(\d+d)?(\d+h)?(\d+m)?(\d+(\.\d+)?s)?$`, glyph)
-		if !ok || glyph == "" {
+		if glyph == "" || !duRe.MatchString(glyph) {
 			fail(n, "invalid duration")
 		}
 		return Tagged{Tag: "du", Value: glyph}
 	case "sz":
-		ok, _ := regexp.MatchString(`^\d+(\.\d+)?(B|KB|MB|GB|TB|PB|KiB|MiB|GiB|TiB|PiB)$`, glyph)
-		if !ok {
+		if !szRe.MatchString(glyph) {
 			fail(n, "invalid data size")
 		}
 		return Tagged{Tag: "sz", Value: glyph}
 	case "unix":
 		return parseUnix(glyph, n)
 	case "ver":
-		if ok, _ := regexp.MatchString(`^\d+(\.\d+)*$`, glyph); !ok {
+		if !verRe.MatchString(glyph) {
 			fail(n, "invalid version")
 		}
 		return Tagged{Tag: "ver", Value: glyph}
 	case "uuid":
-		if ok, _ := regexp.MatchString(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`, glyph); !ok {
+		if !uuidRe.MatchString(glyph) {
 			fail(n, "invalid uuid")
 		}
 		return Tagged{Tag: "uuid", Value: glyph}
@@ -571,59 +510,66 @@ func applyTag(tag, glyph string, n int) any {
 		}
 		return b
 	case "c":
-		if m := regexp.MustCompile(`^U\+([0-9A-Fa-f]{4,6})$`).FindStringSubmatch(glyph); m != nil {
-			cp, _ := strconv.ParseInt(m[1], 16, 32)
+		m := cpRe.FindStringSubmatch(glyph)
+		if m != nil {
+			cp, err := strconv.ParseInt(m[1], 16, 32)
+			if err != nil || cp > 0x10ffff {
+				fail(n, "invalid code point")
+			}
 			return Tagged{Tag: "c", Value: string(rune(cp))}
 		}
-		if len([]rune(glyph)) != 1 {
+		runes := []rune(glyph)
+		if len(runes) != 1 {
 			fail(n, "character must be a single scalar")
 		}
 		return Tagged{Tag: "c", Value: glyph}
-	default:
-		return Tagged{Tag: tag, Value: glyph}
 	}
-	return nil
+	return Tagged{Tag: tag, Value: glyph}
 }
 
-func stripUnderscores(s string, n int) string {
-	if strings.Contains(s, "__") || strings.HasPrefix(s, "_") || strings.HasSuffix(s, "_") {
-		fail(n, "invalid numeric underscores")
-	}
-	return strings.ReplaceAll(s, "_", "")
-}
+var (
+	leadingZero = regexp.MustCompile(`^-?0\d`)
+	intRe       = regexp.MustCompile(`^-?\d+$`)
+	floatRe1    = regexp.MustCompile(`^-?\d+\.\d+([eE][+-]?\d+)?$`)
+	floatRe2    = regexp.MustCompile(`^-?\d+[eE][+-]?\d+$`)
+)
 
 func parseN(g string, n int) any {
 	s := stripUnderscores(g, n)
-	if regexp.MustCompile(`^-?0\d`).MatchString(s) {
+	if leadingZero.MatchString(s) {
 		fail(n, "leading zeros are not allowed")
 	}
-	if ok, _ := regexp.MatchString(`^-?\d+$`, s); ok {
-		v, err := strconv.ParseInt(s, 10, 64)
+	if intRe.MatchString(s) {
+		val, err := strconv.ParseInt(s, 10, 64)
 		if err != nil {
 			fail(n, "integer overflow")
 		}
-		return v
+		return val
 	}
-	v, err := strconv.ParseFloat(s, 64)
-	if err != nil {
-		fail(n, "invalid number")
+	if floatRe1.MatchString(s) || floatRe2.MatchString(s) {
+		val, err := strconv.ParseFloat(s, 64)
+		if err != nil {
+			fail(n, "invalid number")
+		}
+		return val
 	}
-	return v
+	fail(n, "invalid number")
+	return nil
 }
 
 func parseI(g string, n int) int64 {
 	s := stripUnderscores(g, n)
-	if ok, _ := regexp.MatchString(`^-?\d+$`, s); !ok {
+	if !intRe.MatchString(s) {
 		fail(n, "invalid integer")
 	}
-	if regexp.MustCompile(`^-?0\d`).MatchString(s) {
+	if leadingZero.MatchString(s) {
 		fail(n, "leading zeros are not allowed")
 	}
-	v, err := strconv.ParseInt(s, 10, 64)
+	val, err := strconv.ParseInt(s, 10, 64)
 	if err != nil {
 		fail(n, "integer overflow")
 	}
-	return v
+	return val
 }
 
 func parseF(g string, n int) float64 {
@@ -631,25 +577,254 @@ func parseF(g string, n int) float64 {
 	if !strings.Contains(s, ".") && !strings.ContainsAny(s, "eE") {
 		fail(n, "float must contain '.' or 'e'")
 	}
-	v, err := strconv.ParseFloat(s, 64)
+	val, err := strconv.ParseFloat(s, 64)
 	if err != nil {
 		fail(n, "invalid float")
 	}
-	return v
+	return val
 }
 
 func parseUnix(g string, n int) any {
 	s := stripUnderscores(g, n)
-	if regexp.MustCompile(`^-?0\d`).MatchString(s) {
+	if leadingZero.MatchString(s) {
 		fail(n, "leading zeros are not allowed")
 	}
-	if ok, _ := regexp.MatchString(`^-?\d+$`, s); ok {
-		v, _ := strconv.ParseInt(s, 10, 64)
-		return v
+	if intRe.MatchString(s) {
+		val, err := strconv.ParseInt(s, 10, 64)
+		if err == nil {
+			return val
+		}
 	}
-	v, err := strconv.ParseFloat(s, 64)
+	if floatRe1.MatchString(s) {
+		val, err := strconv.ParseFloat(s, 64)
+		if err == nil {
+			return val
+		}
+	}
+	fail(n, "invalid unix timestamp")
+	return nil
+}
+
+// --- Encoder ---
+
+func Marshal(v any) ([]byte, error) {
+	s, err := Encode(v)
 	if err != nil {
-		fail(n, "invalid unix timestamp")
+		return nil, err
 	}
-	return v
+	return []byte(s), nil
+}
+
+func Encode(v any) (out string, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			if e, ok := r.(*Error); ok {
+				err = e
+				out = ""
+			} else {
+				panic(r)
+			}
+		}
+	}()
+
+	rv := reflect.ValueOf(v)
+	if rv.Kind() == reflect.Pointer {
+		rv = rv.Elem()
+	}
+	if rv.Kind() != reflect.Map {
+		fail(0, "root must be a dictionary")
+	}
+	if rv.Len() == 0 {
+		return "", nil
+	}
+
+	var lines []string
+	encodeMap(rv, 0, &lines)
+	return strings.Join(lines, "\n") + "\n", nil
+}
+
+func validateKey(k string) string {
+	if k == "" {
+		fail(0, "key cannot be empty")
+	}
+	if strings.ContainsAny(k, "\n\r") || strings.Contains(k, ": ") || strings.HasSuffix(k, ":") {
+		fail(0, "invalid key format: %s", k)
+	}
+	return k
+}
+
+func encodeMap(rv reflect.Value, depth int, lines *[]string) {
+	if depth > maxDepth {
+		fail(0, "nesting depth exceeds limit")
+	}
+	indent := strings.Repeat("  ", depth)
+	keys := rv.MapKeys()
+	sort.Slice(keys, func(i, j int) bool {
+		return keys[i].String() < keys[j].String()
+	})
+
+	for _, k := range keys {
+		keyStr := validateKey(k.String())
+		val := rv.MapIndex(k).Interface()
+		encodeKeyVal(indent, keyStr, val, depth, lines)
+	}
+}
+
+func encodeKeyVal(indent, key string, val any, depth int, lines *[]string) {
+	if val == nil {
+		*lines = append(*lines, fmt.Sprintf("%s%s:", indent, key))
+		return
+	}
+
+	switch v := val.(type) {
+	case Tagged:
+		if strings.ContainsAny(v.Value, "\n\r") {
+			*lines = append(*lines, fmt.Sprintf("%s%s: !%s |", indent, key, v.Tag))
+			for _, line := range strings.Split(strings.ReplaceAll(v.Value, "\r\n", "\n"), "\n") {
+				*lines = append(*lines, fmt.Sprintf("%s  %s", indent, line))
+			}
+			*lines = append(*lines, fmt.Sprintf("%s|", indent))
+		} else {
+			*lines = append(*lines, fmt.Sprintf("%s%s: !%s %s", indent, key, v.Tag, v.Value))
+		}
+	case []byte:
+		*lines = append(*lines, fmt.Sprintf("%s%s: !xb %s", indent, key, strings.ToUpper(hex.EncodeToString(v))))
+	case string:
+		if strings.ContainsAny(v, "\n\r") {
+			*lines = append(*lines, fmt.Sprintf("%s%s: |", indent, key))
+			for _, line := range strings.Split(strings.ReplaceAll(v, "\r\n", "\n"), "\n") {
+				*lines = append(*lines, fmt.Sprintf("%s  %s", indent, line))
+			}
+			*lines = append(*lines, fmt.Sprintf("%s|", indent))
+		} else if v == "" {
+			*lines = append(*lines, fmt.Sprintf("%s%s:", indent, key))
+		} else {
+			if strings.HasPrefix(v, "!") || v == "[]" || v == "{}" || strings.HasPrefix(v, "|") {
+				*lines = append(*lines, fmt.Sprintf("%s%s: !s %s", indent, key, v))
+			} else {
+				*lines = append(*lines, fmt.Sprintf("%s%s: %s", indent, key, v))
+			}
+		}
+	case bool:
+		bStr := "false"
+		if v {
+			bStr = "true"
+		}
+		*lines = append(*lines, fmt.Sprintf("%s%s: !b %s", indent, key, bStr))
+	case int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64:
+		*lines = append(*lines, fmt.Sprintf("%s%s: !i %v", indent, key, v))
+	case float32, float64:
+		s := fmt.Sprintf("%v", v)
+		if !strings.Contains(s, ".") && !strings.ContainsAny(s, "eE") {
+			s += ".0"
+		}
+		*lines = append(*lines, fmt.Sprintf("%s%s: !f %s", indent, key, s))
+	default:
+		rv := reflect.ValueOf(val)
+		if rv.Kind() == reflect.Pointer {
+			rv = rv.Elem()
+		}
+		if rv.Kind() == reflect.Map {
+			if rv.Len() == 0 {
+				*lines = append(*lines, fmt.Sprintf("%s%s: {}", indent, key))
+			} else {
+				*lines = append(*lines, fmt.Sprintf("%s%s:", indent, key))
+				encodeMap(rv, depth+1, lines)
+			}
+		} else if rv.Kind() == reflect.Slice || rv.Kind() == reflect.Array {
+			if rv.Len() == 0 {
+				*lines = append(*lines, fmt.Sprintf("%s%s: []", indent, key))
+			} else {
+				*lines = append(*lines, fmt.Sprintf("%s%s:", indent, key))
+				encodeSlice(rv, depth+1, lines)
+			}
+		} else {
+			fail(0, "unsupported type %T for key %s", val, key)
+		}
+	}
+}
+
+func encodeSlice(rv reflect.Value, depth int, lines *[]string) {
+	if depth > maxDepth {
+		fail(0, "nesting depth exceeds limit")
+	}
+	indent := strings.Repeat("  ", depth)
+	for i := 0; i < rv.Len(); i++ {
+		val := rv.Index(i).Interface()
+		encodeListItem(indent, val, depth, lines)
+	}
+}
+
+func encodeListItem(indent string, val any, depth int, lines *[]string) {
+	if val == nil {
+		*lines = append(*lines, fmt.Sprintf("%s-", indent))
+		return
+	}
+
+	switch v := val.(type) {
+	case Tagged:
+		if strings.ContainsAny(v.Value, "\n\r") {
+			*lines = append(*lines, fmt.Sprintf("%s- !%s |", indent, v.Tag))
+			for _, line := range strings.Split(strings.ReplaceAll(v.Value, "\r\n", "\n"), "\n") {
+				*lines = append(*lines, fmt.Sprintf("%s  %s", indent, line))
+			}
+			*lines = append(*lines, fmt.Sprintf("%s|", indent))
+		} else {
+			*lines = append(*lines, fmt.Sprintf("%s- !%s %s", indent, v.Tag, v.Value))
+		}
+	case []byte:
+		*lines = append(*lines, fmt.Sprintf("%s- !xb %s", indent, strings.ToUpper(hex.EncodeToString(v))))
+	case string:
+		if strings.ContainsAny(v, "\n\r") {
+			*lines = append(*lines, fmt.Sprintf("%s- |", indent))
+			for _, line := range strings.Split(strings.ReplaceAll(v, "\r\n", "\n"), "\n") {
+				*lines = append(*lines, fmt.Sprintf("%s  %s", indent, line))
+			}
+			*lines = append(*lines, fmt.Sprintf("%s|", indent))
+		} else if v == "" {
+			*lines = append(*lines, fmt.Sprintf("%s-", indent))
+		} else {
+			if strings.HasPrefix(v, "!") || v == "[]" || v == "{}" || strings.HasPrefix(v, "|") {
+				*lines = append(*lines, fmt.Sprintf("%s- !s %s", indent, v))
+			} else {
+				*lines = append(*lines, fmt.Sprintf("%s- %s", indent, v))
+			}
+		}
+	case bool:
+		bStr := "false"
+		if v {
+			bStr = "true"
+		}
+		*lines = append(*lines, fmt.Sprintf("%s- !b %s", indent, bStr))
+	case int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64:
+		*lines = append(*lines, fmt.Sprintf("%s- !i %v", indent, v))
+	case float32, float64:
+		s := fmt.Sprintf("%v", v)
+		if !strings.Contains(s, ".") && !strings.ContainsAny(s, "eE") {
+			s += ".0"
+		}
+		*lines = append(*lines, fmt.Sprintf("%s- !f %s", indent, s))
+	default:
+		rv := reflect.ValueOf(val)
+		if rv.Kind() == reflect.Pointer {
+			rv = rv.Elem()
+		}
+		if rv.Kind() == reflect.Map {
+			if rv.Len() == 0 {
+				*lines = append(*lines, fmt.Sprintf("%s- {}", indent))
+			} else {
+				*lines = append(*lines, fmt.Sprintf("%s-", indent))
+				encodeMap(rv, depth+1, lines)
+			}
+		} else if rv.Kind() == reflect.Slice || rv.Kind() == reflect.Array {
+			if rv.Len() == 0 {
+				*lines = append(*lines, fmt.Sprintf("%s- []", indent))
+			} else {
+				*lines = append(*lines, fmt.Sprintf("%s-", indent))
+				encodeSlice(rv, depth+1, lines)
+			}
+		} else {
+			fail(0, "unsupported list item type %T", val)
+		}
+	}
 }

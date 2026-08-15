@@ -1,8 +1,4 @@
 # Example from the language README
-$api: https://api.example.com/v2
-$ports: !n[80, 443, 8080]
-$zone: !tz Asia/Shanghai
-
 server:
   host: localhost
   port: !n 8080
@@ -15,9 +11,9 @@ features:
   - auth
   - cache
 
-ports: $ports
-endpoint: ${api}/orders
-tz: $zone
+ports: !n[80, 443, 8080]
+endpoint: https://api.example.com/v2/orders
+tz: !tz Asia/Shanghai
 py: !ver 3.10
 limit: !sz 10MiB
 when: !dt 2026-08-14T16:54:00+08:00

@@ -3,6 +3,7 @@ package io.github.qorm.xun;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Arrays;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -23,6 +24,8 @@ public final class XunTest {
     testLiteralS();
     testCompactChars();
     testStringCompact();
+    testEncodeAndRoundTrip();
+    testFileWriteAndRead();
     if (failed > 0) {
       System.err.println(failed + " failed");
       System.exit(1);
@@ -30,9 +33,36 @@ public final class XunTest {
     System.out.println("ok");
   }
 
+  static void testFileWriteAndRead() throws Exception {
+    Map<String, Object> data = new LinkedHashMap<>();
+    data.put("app", "java-xun");
+    data.put("version", new Xun.Tagged("ver", "0.1.1"));
+    data.put("port", 8080L);
+    data.put("tags", List.of("jvm", "xun"));
+    data.put("raw", new byte[] {(byte) 0x12, (byte) 0x34});
+    data.put("text", "Line A\nLine B");
+
+    Path tmp = Files.createTempFile("test_java", ".xun");
+    try {
+      String encoded = Xun.encode(data);
+      Files.writeString(tmp, encoded);
+
+      String content = Files.readString(tmp);
+      Map<String, Object> parsed = Xun.parse(content);
+      eq(parsed.get("app"), "java-xun", "file app");
+      eq(parsed.get("version"), new Xun.Tagged("ver", "0.1.1"), "file ver");
+      eq(parsed.get("port"), 8080L, "file port");
+      eq(parsed.get("tags"), List.of("jvm", "xun"), "file tags");
+      eq(parsed.get("raw"), new byte[] {(byte) 0x12, (byte) 0x34}, "file raw");
+      eq(parsed.get("text"), "Line A\nLine B", "file text");
+    } finally {
+      Files.deleteIfExists(tmp);
+    }
+  }
+
   static void eq(Object a, Object b, String msg) {
-    if (a instanceof byte[] ba && b instanceof byte[] bb) {
-      if (!Arrays.equals(ba, bb)) {
+    if (a instanceof byte[] && b instanceof byte[]) {
+      if (!Arrays.equals((byte[]) a, (byte[]) b)) {
         fail(msg + ": " + a + " != " + b);
       }
       return;
@@ -111,7 +141,7 @@ public final class XunTest {
   }
 
   static void testLiteralS() {
-    eq(Xun.parse("$api: https://x.test\na: !s $api\n").get("a"), "$api", "literal $");
+    eq(Xun.parse("a: !s !important\n").get("a"), "!important", "literal s");
   }
 
   static void testCompactChars() {
@@ -123,5 +153,27 @@ public final class XunTest {
 
   static void testStringCompact() {
     throwsXun("v: !s[a, b]\n", "string compact");
+  }
+
+  static void testEncodeAndRoundTrip() {
+    Map<String, Object> data = new LinkedHashMap<>();
+    Map<String, Object> server = new LinkedHashMap<>();
+    server.put("host", "localhost");
+    server.put("port", 8080L);
+    data.put("server", server);
+    data.put("empty_dict", new LinkedHashMap<>());
+    data.put("empty_list", List.of());
+    data.put("features", List.of("auth", "cache"));
+    data.put("banner", "Welcome\nto XUN");
+    data.put("flag", true);
+    data.put("color", new byte[] {(byte) 0xde, (byte) 0xad, (byte) 0xbe, (byte) 0xef});
+    data.put("py", new Xun.Tagged("ver", "3.10"));
+
+    String encoded = Xun.encode(data);
+    Map<String, Object> parsed = Xun.parse(encoded);
+    eq(parsed.get("banner"), "Welcome\nto XUN", "roundtrip banner");
+    eq(parsed.get("flag"), true, "roundtrip flag");
+    eq(parsed.get("color"), new byte[] {(byte) 0xde, (byte) 0xad, (byte) 0xbe, (byte) 0xef}, "roundtrip color");
+    eq(parsed.get("py"), new Xun.Tagged("ver", "3.10"), "roundtrip py");
   }
 }

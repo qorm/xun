@@ -2,21 +2,21 @@
 
 [English](README.en.md) · [中文](README.md)
 
-XUN（读作「讯」）是一种给人写、给机器解析的配置记法：默认不引号，类型用 `!tag` 显式标出，缩进固定每层两空格。全称 **X Unquoted Notation**。
+XUN（读作「讯」）是一种为人编写、为机器解析而设计的现代配置记法：**默认不加引号**，**类型显式标出（`!tag`）**，**缩进严格固定每层 2 个空格**。全称 **X Unquoted Notation**。
 
 - 文件扩展名：`.xun`
 - 媒体类型：`text/xun`
-- 语言 id：`xun`
+- 语言标识：`xun`
 
-相对 JSON，少引号、有注释、有多行。相对 YAML，不猜类型（`3.10` 不会变成 `3.1`），多行必须收尾。相对 TOML，深层嵌套靠缩进，不必重复写路径。
+相对 JSON：少写大量引号、支持注释、原生支持整洁的多行文本块。  
+相对 YAML：不猜测类型（`3.10` 绝对不会变成浮点数 `3.1`，`yes`/`NO` 纯粹是字符串），多行块必须显式收尾，无复杂隐式陷阱。  
+相对 TOML：深层嵌套直接依靠缩进表达，无需重复书写长路径表头 `[a.b.c.d]`。
+
+---
 
 ## 示例
 
 ```xun
-$api: https://api.example.com/v2
-$ports: !n[80, 443, 8080]
-$zone: !tz Asia/Shanghai
-
 server:
   host: localhost
   port: !n 8080
@@ -29,9 +29,9 @@ features:
   - auth
   - cache
 
-ports: $ports
-endpoint: ${api}/orders
-tz: $zone
+ports: !n[80, 443, 8080]
+endpoint: https://api.example.com/v2/orders
+tz: !tz Asia/Shanghai
 py: !ver 3.10
 limit: !sz 10MiB
 when: !dt 2026-08-14T16:54:00+08:00
@@ -47,240 +47,245 @@ banner: |
 |
 ```
 
-## 文件
+---
 
-整文件必须是 UTF-8。非法字节、`NUL`（U+0000）直接失败，不替换成 U+FFFD。
+## 核心语法规范
 
-- BOM：仅允许出现在文件开头，读入时丢掉
-- 换行：LF / CRLF / CR 都算一行，读入后统一成 LF
-- 缩进：只认 ASCII 空格 U+0020，每层正好 2 格。Tab、跳级、奇数空格都是错误
-- 根必须是字典。空文件或只有注释等于 `{}`
-- 不做文件 include
+### 1. 文件与编码
+- **UTF-8 编码**：整文件必须为合法 UTF-8。遇到非法字节或 `NUL`（U+0000）直接报错解析失败。
+- **BOM**：仅允许出现在文件最开头（U+FEFF），读入时自动忽略。
+- **换行符**：支持 LF (`\n`)、CRLF (`\r\n`) 与 CR (`\r`)，读入后内部统一规范为 LF。
+- **严格缩进**：仅识别 ASCII 空格（U+0020），**每级缩进严格为 2 个空格**。禁止 Tab、禁止奇数空格、禁止跳级缩进。
+- **根节点**：**必须是字典**。空文件或仅含注释的文件等价于空字典 `{}`。
 
-## 结构
+### 2. 结构与容器
+XUN 中只有三种节点：**字典（Dictionary）**、**列表（List）** 和 **标量（Scalar）**。
 
-三种节点：字典、列表、标量。
+- **字典键值对**：分隔符必须是 `: `（冒号后跟空格）或行尾单独的 `:`。
+  - `key: value`（正确）
+  - `key:value`（**非法**，冒号后缺少空格）
+  - 键名不能为空，不能包含换行，不能包含 `: `。同一层级字典中键名不可重复。
+- **列表项**：以 `- ` 或单独的 `-` 开头。
+- **同层容器互斥**：同一层级内要么全部是字典键值对，要么全部是列表项，严禁混用。
+- **显式空容器**：空字典写为 `{}`，空列表写为 `[]`。
 
 ```xun
-# 字典：冒号后有空格（或行尾冒号）
-host: localhost
-tls:
-  cert: /etc/ssl/cert.pem
+# 嵌套字典
+database:
+  host: 127.0.0.1
+  port: !n 5432
 
 # 列表
-features:
-  - auth
-  - cache
+users:
+  - alice
+  - bob
 
-# 空容器必须写出来
-plugins: []
-meta: {}
+# 显式空容器
+empty_map: {}
+empty_list: []
 ```
 
-分隔符必须是 `: ` 或行尾 `:`。`key:value`（冒号后无空格）整行非法。
+### 3. 类型系统（显式标注）
 
-同一层不能既有 `-` 又有 `key:`。一个容器要么全是字典，要么全是列表。
+**无 `!tag` 的值一律为纯字符串，解析器绝不猜测类型。**  
+例如：`8080`、`true`、`false`、`NO`、`3.10` 在没有 tag 时均为普通字符串。需要特定类型时，必须在值前显式声明 tag 并以空格分隔（紧凑数组除外）。
 
-键取到第一个 `: ` 为止，可含中文，不能为空，不能含 `: `。重复键报错（不 last-wins）。键、tag、`true` / `false` 都区分大小写。解析保留键的出现顺序。
+| Tag | 类型含义 | 合法字形示例 | 非法示例 / 说明 |
+| :--- | :--- | :--- | :--- |
+| （无） / `!s` | 字符串 | `hello world`，`!s !special` | `!s` 用于显式声明或值以 `!` 开头 |
+| `!n` | 数字（通用） | `8080`、`-12`、`3.14`、`1e-3` | `012`（禁止前导零）、`1_000` 支持下划线 |
+| `!i` | 整数 | `8080`、`-3`、`1_000` | `1.5`、超出 64 位整型范围 |
+| `!f` | 浮点数 | 必须含 `.` 或 `e`：`1.5`、`8080.0`、`1e3` | `!f 8080`（缺少小数点或指数） |
+| `!x` | 十六进制整数 | `DEAD_BEEF`、`0xFF` | 非十六进制字符 |
+| `!xb` | 十六进制字节序列 | `FF00AA`（必须为偶数位） | `F0A`（奇数位非法） |
+| `!o` | 八进制（如权限） | `755`、`0644` | 含有 `8` 或 `9` |
+| `!b` | 布尔值 | 仅 `true` 或 `false` | `yes`、`1`、`True`、`ON` |
+| `!d` | 日期 | `2026-08-14`（`YYYY-MM-DD`） | `2026/08/14` |
+| `!t` | 时间 | `16:54`、`16:54:00`、`16:54:00.123` | `4pm` |
+| `!dt` | 带时区日期时间 | `2026-08-14T16:54:00+08:00`、`...Z` | 缺少时区偏移 |
+| `!tz` | 时区标识 | IANA 时区（如 `Asia/Shanghai`）、`Z`、`+08:00` | `CST`（歧义缩写） |
+| `!du` | 时间跨度/时长 | `1d2h30m15s`、`500ms`、`10s` | `90 minutes` |
+| `!sz` | 数据容量大小 | `10MiB`、`3KB`、`1024B` | `10m` |
+| `!unix` | Unix 纪元时间戳 | `1692000000` | 带前导零 |
+| `!ver` | 语义版本号 | `3.10`（按段存储，不作浮点解析）、`1.2.3` | `3.10.beta` |
+| `!uuid` | UUID | `8-4-4-4-12` 格式带连字符 | 缺少连字符 |
+| `!ip` | IP 地址 | IPv4 `127.0.0.1`、IPv6 `::1` | 带端口号（如 `127.0.0.1:80`） |
+| `!b64` | Base64 字节 | `SGVsbG8=` | 非法 Base64 字符 |
+| `!c` | 单个 Unicode 字符 | 单个字符 `a` 或码点 `U+000A` | 多个字符 `ab` |
 
-结构行去掉行尾空白；多行正文保留行尾空格。
+- **未知 Tag**：如 `!sql`、`!md`、`!custom` 均为合法语法。解析器会保留 Tag 名称及原始文本，供上层应用处理。
+- **无 `null`**：字段缺失请直接不写该键；空字符串写作 `key:`（后无子项）。
 
-## 类型
+### 4. 数组（紧凑与列表形式）
 
-无 `!tag` 的值是字符串，不猜。`8080`、`true`、`NO`、`3.10` 都是字符串。要类型就写在值前面。
+- **紧凑数组**：类型标在整个中括号前，元素间用逗号分隔（元素内部不可含逗号）。
+  ```xun
+  ports: !n[80, 443, 8080]
+  vowels: !c[a, e, i]
+  peers: !ip[127.0.0.1, ::1]
+  py_versions: !ver[3.10, 3.11]
+  ```
+- **块形式数组**：
+  - 字符串数组**必须**使用块形式（防止逗号切分歧义）：
+    ```xun
+    roles: !s[]
+      - admin
+      - ops
+      - hello, world
+    ```
+  - 普通未标类型列表：
+    ```xun
+    items:
+      - item1
+      - item2
+    ```
 
-| tag | 含义 | 合法字形 | 非法 |
-| --- | --- | --- | --- |
-| （无） / `!s` | 字符串 | 行尾之前原样。`!s` 用于值以 `!` 或 `$` 开头 | — |
-| `!n` | 数字 | 无 `.` / `e` 当整数，否则当浮点 | 前导零、`abc` |
-| `!i` | 整数 | `8080` `-3` `1_000` | `1.5`、溢出 i64 |
-| `!f` | 浮点 | 必须含 `.` 或 `e`：`1.5` `1e-3` `8080.0` | `!f 8080` |
-| `!x` | 十六进制**整数** | `DEAD_BEEF`（前导零不改变数值） | 空、非十六进制 |
-| `!xb` | 十六进制**字节** | `FF00AA`（偶数位，前导零保留） | 奇数位 |
-| `!o` | 八进制（权限） | `755` `0644` | 含 8、9 |
-| `!b` | 布尔 | 仅 `true` / `false` | `yes` `ON` `1` |
-| `!d` | 日期 | `YYYY-MM-DD` | `08/14/2026` |
-| `!t` | 时间 | `HH:MM` 或 `HH:MM:SS` | `4pm` |
-| `!dt` | 日期时间 | 必须带 `Z` 或 `±HH:MM` | 缺偏移 |
-| `!tz` | 时区 | IANA 名，或 `Z` / `+08:00` | `CST` |
-| `!du` | 时长 | `1d2h30m15s` | `90 minutes`、裸 `10m` 当兆 |
-| `!sz` | 数据大小 | `10MiB` `3KB` `1024B` | `10m`（那是时长） |
-| `!unix` | Unix 纪元秒 | `1692000000` | 前导零 |
-| `!ver` | 版本 | `3.10` 按段保存，不是浮点 | `3.10.beta` |
-| `!uuid` | UUID | `8-4-4-4-12`，连字符必有 | 缺连字符 |
-| `!ip` | IP | `127.0.0.1` 或 `::1`，不含端口 | `127.0.0.1:80` |
-| `!b64` | Base64 | `SGVsbG8=` 或 `!b64 \| … \|` | 非法字母表 |
-| `!c` | 字符 | 同行一个 Unicode 标量，或 `U+000A` | 跨行、`ab` |
+### 5. 多行文本块
 
-未知 tag（`!sql`、`!md`、`!json`）合法：解析器保存 tag 和原始字形，交给上层。
-
-没有 `null`。缺省靠不写这个键；空字符串用 `key:` 且无子树。
-
-## 数组
-
-类型标在整个数组上。元素不含逗号的可以紧凑写；字符串数组必须用 `-` 项。
-
-```xun
-ports: !n[80, 443, 8080]
-vowels: !c[a, e, i]
-peers: !ip[127.0.0.1, ::1]
-py: !ver[3.10, 3.11]
-
-roles: !s[]
-  - admin
-  - ops
-  - a, b 仍是一个字符串
-
-ports: !n[]
-  - 80
-  - 443
-```
-
-- `[]` 是空的、未标类型的列表
-- `!n[]` 且无子项是空的数字数组
-- 没有数组 tag 的 `-` 列表，元素默认是字符串；单项仍可写 `!n`
-
-## 多行
-
-只靠缩进结束多行会歧义（空行、漏缩进会变成下一个键）。XUN 进入正文模式后必须看到结尾符才恢复结构。
+XUN 使用严格的定界符结束多行块，杜绝缩进歧义：
 
 ```xun
 banner: |
-  Hello
-
-  World
+  Line 1
+  Line 2
 |
-next: x
 
 query: !sql |
-  SELECT
-    id,
-    name
+  SELECT id, name
   FROM users
+  WHERE active = true
 |
 ```
 
-- 开块：值位是 `|` 或 `!tag |`
-- 收尾：与开块同一缩进、整行去掉空格后恰好是 `|`
-- 正文每行再多 2 空格，剥掉这 2 格；多出来的空格留在值里
-- 块内 `#`、`:`、`-`、`!`、`$` 都是字面量，不替换变量
-- 缺收尾则 EOF 报错，不猜测结束
-- 默认不含末尾换行；要末尾换行就在 `|` 前再留一个空行
+- **开始标记**：值位置写 `|` 或 `!tag |`（或自定义闭合标识如 `|MD`）。
+- **结束标记**：在与开块**相同缩进**的一行，单独写 `|`（或对应的闭合标识如 `MD`）。
+- **正文缩进**：正文每行比开块所在行多缩进 2 个空格，解析时会自动去除这 2 个基础空格。
+- **字面量保证**：多行块内部的所有字符（包括 `#`、`:`、`-`、`!` 等）均作为普通字符原样保留。
 
-正文里也会出现单独一行 `|` 时，开块加标签：
+---
 
-```xun
-table: |MD
-  | a | b |
-  |---|---|
-MD
-```
+## AI 与开发者编写准则 (AI Guidelines & Cheatsheet)
 
-`TAG` 限定 `[A-Za-z_][A-Za-z0-9_]*`。
+为了确保 AI 模型和自动化工具能够 100% 正确生成合法的 XUN 配置，请遵循以下核心原则：
 
-## 变量区
+### 黄金规则清单
+1. **严格 2 格空格缩进**：禁止使用 Tab，每级深度正好 2 个空格。
+2. **冒号后必须有空格**：字典键值对写 `key: value`，绝对不要写成 `key:value`。
+3. **默认不加引号**：不要给字符串加 `"` 或 `'`。如果你写了 `name: "Alice"`，双引号会变成字符串内容的一部分。
+4. **显式类型 Tag**：数字如果要当数字，请写 `!n 8080` 或 `!i 8080`；布尔值请写 `!b true`；否则它们都是字符串。
+5. **多行块必须闭合**：以 `|` 开始的多行文本块，必须在同级缩进以 `|` 显式闭合。
+6. **空容器显式书写**：空字典写 `{}`，空列表写 `[]`。
+7. **没有 null**：不需要的字段直接省略，或者用 `key:` 表示空字符串。
 
-文件最开头是变量区。行首 `$` 就是定义。遇到第一条既不是 `$`、也不是注释 / 空行的行，变量区结束，该行起算正文。正文里再写 `$foo:` 报错。
+### 正确与错误模式对比 (Do's & Don'ts)
 
-```xun
-$api: https://api.example.com/v2
-$port: !n 8080
-# 变量区里的普通注释
+| 场景 | ❌ 错误写法 | ✅ 正确写法 | 为什么 |
+| :--- | :--- | :--- | :--- |
+| **冒号空格** | `port:8080` | `port: !n 8080` | XUN 规定冒号后必须有空格 |
+| **字符串引号** | `name: "Alice"` | `name: Alice` | XUN 默认不加引号，加了会保留引号字符 |
+| **数字类型** | `count: 10` （期望整数） | `count: !i 10` 或 `!n 10` | 未标注 tag 的标量一律解析为字符串 `"10"` |
+| **布尔类型** | `enabled: true` （期望布尔） | `enabled: !b true` | 未标注 tag 的 `true` 解析为字符串 `"true"` |
+| **浮点数** | `rate: !f 100` | `rate: !f 100.0` | `!f` 必须包含小数点 `.` 或指数 `e` |
+| **字符串数组** | `tags: !s[a, b]` | `tags: !s[]`<br>`  - a`<br>`  - b` | 字符串数组禁止使用紧凑逗号形式 |
+| **多行文本** | `desc: \|`<br>`  hello` （未闭合） | `desc: \|`<br>`  hello`<br>`\|` | 多行块必须显式以同级 `\|` 闭合 |
+| **空字典** | `meta:` （下无内容表示空串） | `meta: {}` | 空字典必须显式写 `{}` |
 
-base: $api
-users: ${api}/users
-port: $port
-literal: !s $api
-```
+---
 
-- `$name`：整个值替换，类型跟着走
-- `${name}`：只在单行字符串里插值
-- `|…|` 块内不替换
-- 先定义后使用；重复、未定义、循环都报错
-- 变量不进入输出树，展开后才是数据
+## 官方库与 API 支持
 
-## 注释
+XUN 提供了 6 种主流语言的标准实现，均包含完整的 **解析器（Decoder / `parse`）** 与 **编码器（Encoder / `encode`）**，并通过了双向互转（Round-trip）测试。
 
-结构行行首 `#` 是注释。不做行尾注释（值末尾的 `#` 算内容）。多行块内部的 `#` 是正文。
+| 语言 | 模块/包路径 | 解析 (Decode) | 编码 (Encode) | 安装/使用方式 |
+| :--- | :--- | :--- | :--- | :--- |
+| **JavaScript** | [`@qorm/xun`](javascript/) | `parse(str)` | `encode(obj)` / `stringify(obj)` | `npm install @qorm/xun` |
+| **Python** | [`xun-format`](python/) | `parse(str)` | `encode(dict)` / `dump(dict, fp)` / `dumps(dict)` | `pip install git+https://github.com/qorm/xun.git#subdirectory=python` |
+| **Go** | [`github.com/qorm/xun/go`](go/) | `xun.Parse(str)` | `xun.Encode(v)` / `xun.Marshal(v)` | `go get github.com/qorm/xun/go` |
+| **Rust** | [`xun`](rust/) | `xun::parse(&str)` | `xun::encode(&val)` / `xun::to_string(&val)` | `xun = { git = "https://github.com/qorm/xun", subdirectory = "rust" }` |
+| **Java** | [`io.github.qorm.xun`](java/) | `Xun.parse(str)` | `Xun.encode(map)` / `Xun.dump(map)` | 引入 `java/src` 源码路径 |
+| **C** | [`c/`](c/) | `xun_parse` / `xun_parse_file` | `xun_encode` / `xun_encode_file` | 编译 `xun.h` / `xun.c` |
 
-## 解析
+### 代码使用示例
 
-1. UTF-8 解码，失败则停
-2. 切行，先读变量区建成表
-3. 正文按缩进栈解析；遇到 `|` 进入正文模式，直到同级收尾
-4. 标量做 `$name` / `${name}` 替换
-5. 漏缩进、漏结尾符、重复键、非法字形全部硬失败，不复原成下一字段
-
-实现必须设限，建议至少 64 层嵌套、文件 1MB，防止畸形输入。
-
-## 明确不做
-
-- 隐式类型（`yes` / `NO` / 挪威问题）
-- 点键路径 `a.b.c`、YAML 锚点 `&*`、多文档 `---`
-- 无类型的行内 `[a, b]`（逗号会逼出引号）
-- `inf` / `nan`、`null`
-- 文件 include
-- 把 `enum`、secret、set、范围 `1..10` 放进语法（交给 schema）
-
-`!url`、`!email`、`!re`、`!cron` 等走未知 tag，不进核心。
-
-## 解析器
-
-仓库里有六份实现，共用 [`testdata/`](testdata/)。入口都是 `parse(source)`：`source` 是整份 XUN 文本（UTF-8），根节点是字典。`!d` / `!ip` 等特殊类型以带 tag 的值返回；`!xb` / `!b64` 是字节。C 另外提供 `xun_parse_file`。
-
-| 语言 | 包 | 安装 |
-|---|---|---|
-| JavaScript | [`@qorm/xun`](https://www.npmjs.com/package/@qorm/xun) | `npm install @qorm/xun` |
-| Python | [`xun-format`](python/)（`import xun`） | `pip install git+https://github.com/qorm/xun.git#subdirectory=python` |
-| Go | [`github.com/qorm/xun/go`](go/) | `go get github.com/qorm/xun/go` |
-| Rust | [`xun`](rust/) | `xun = { git = "https://github.com/qorm/xun", subdirectory = "rust" }` |
-| Java | [`io.github.qorm.xun`](java/) | 把 `java/src` 加入源码路径 |
-| C | [`c/`](c/) | 把 `xun.h` / `xun.c` 编进工程 |
-
-从文件加载时，先按 UTF-8 读成字符串再交给解析器：
-
+#### JavaScript / TypeScript
 ```js
-import { readFileSync } from "node:fs";
-import { parse } from "@qorm/xun";
+import { parse, encode } from "@qorm/xun";
+import { readFileSync, writeFileSync } from "node:fs";
 
+// 解析
 const doc = parse(readFileSync("config.xun", "utf8"));
+console.log(doc.server.port); // 8080
+
+// 编码
+const output = encode(doc);
+writeFileSync("output.xun", output, "utf8");
 ```
 
+#### Python
 ```python
 from pathlib import Path
-from xun import parse
+from xun import parse, encode
 
+# 解析
 doc = parse(Path("config.xun").read_text(encoding="utf-8"))
+print(doc["server"]["port"])
+
+# 编码
+text = encode(doc)
+Path("output.xun").write_text(text, encoding="utf-8")
 ```
 
+#### Go
 ```go
 package main
 
 import (
-    "log"
-    "os"
+	"fmt"
+	"log"
+	"os"
 
-    "github.com/qorm/xun/go"
+	"github.com/qorm/xun/go"
 )
 
 func main() {
-    b, err := os.ReadFile("config.xun")
-    if err != nil {
-        log.Fatal(err)
-    }
-    doc, err := xun.Parse(string(b))
-    if err != nil {
-        log.Fatal(err)
-    }
-    _ = doc
+	b, err := os.ReadFile("config.xun")
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	// 解析
+	doc, err := xun.Parse(string(b))
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	// 编码
+	encoded, err := xun.Encode(doc)
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Println(encoded)
 }
 ```
 
+#### Rust
 ```rust
-let src = std::fs::read_to_string("config.xun")?;
-let doc = xun::parse(&src)?;
+use xun::{parse, encode};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let src = std::fs::read_to_string("config.xun")?;
+    
+    // 解析
+    let doc = parse(&src)?;
+    
+    // 编码
+    let text = encode(&doc)?;
+    println!("{}", text);
+    Ok(())
+}
 ```
 
+#### Java
 ```java
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -288,24 +293,56 @@ import java.nio.file.Path;
 import java.util.Map;
 import io.github.qorm.xun.Xun;
 
-Map<String, Object> doc = Xun.parse(
-    Files.readString(Path.of("config.xun"), StandardCharsets.UTF_8));
+public class Main {
+    public static void main(String[] args) throws Exception {
+        String src = Files.readString(Path.of("config.xun"), StandardCharsets.UTF_8);
+        
+        // 解析
+        Map<String, Object> doc = Xun.parse(src);
+        
+        // 编码
+        String text = Xun.encode(doc);
+        System.out.println(text);
+    }
+}
 ```
 
+#### C
 ```c
+#include <stdio.h>
+#include <stdlib.h>
 #include "xun.h"
 
-xun_value *doc = NULL;
-xun_error err;
-if (xun_parse_file("config.xun", &doc, &err) != 0) {
-    fprintf(stderr, "line %d: %s\n", err.line, err.message);
-    return 1;
+int main(void) {
+    xun_value *doc = NULL;
+    xun_error err;
+
+    // 解析
+    if (xun_parse_file("config.xun", &doc, &err) != 0) {
+        fprintf(stderr, "line %d: %s\n", err.line, err.message);
+        return 1;
+    }
+
+    // 编码
+    char *text = NULL;
+    size_t len = 0;
+    if (xun_encode(doc, &text, &len) == 0) {
+        printf("%s", text);
+        free(text);
+    }
+
+    xun_free(doc);
+    return 0;
 }
-xun_free(doc);
 ```
 
-JavaScript 已发布到 npm：[`@qorm/xun`](https://www.npmjs.com/package/@qorm/xun)。其余语言尚未上中央仓库，从 Git 安装或把源码编进工程即可。
+---
 
-## 状态
+## 明确不做
 
-语言规则已收敛。JavaScript、Python、Go、Rust、Java、C 解析器已实现。`@qorm/xun` 已发 npm `0.1.0`。
+- 隐式类型转换（不猜测 `yes` / `NO` / 挪威问题）
+- 点键路径 `a.b.c`、YAML 锚点 `&*`、多文档 `---`
+- 无类型的行内 `[a, b]`（逗号会引发引号需求）
+- `inf` / `nan`、`null`
+- 文件 include
+- 将复杂业务类型强行塞入语法核心（如 `enum`、secret、范围等交由 schema 处理）

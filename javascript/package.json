@@ -1,8 +1,8 @@
 {
   "type": "module",
   "name": "@qorm/xun",
-  "version": "0.1.0",
-  "description": "XUN (X Unquoted Notation) parser",
+  "version": "0.1.1",
+  "description": "XUN (X Unquoted Notation) parser and encoder",
   "license": "MIT",
   "keywords": ["xun", "config", "parser", "unquoted"],
   "homepage": "https://github.com/qorm/xun",
