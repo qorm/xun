@@ -1213,7 +1213,7 @@ mod tests {
     fn file_write_and_read() {
         let doc = Value::Dict(vec![
             ("app".into(), Value::String("rust-xun".into())),
-            ("version".into(), Value::Tagged(Tagged { tag: "ver".into(), value: "0.1.2".into() })),
+            ("version".into(), Value::Tagged(Tagged { tag: "ver".into(), value: "0.1.3".into() })),
             ("count".into(), Value::Int(100)),
             ("rate".into(), Value::Float(99.5)),
             ("enabled".into(), Value::Bool(true)),
