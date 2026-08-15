@@ -193,6 +193,55 @@ static void test_symmetric_and_unpack(void) {
   xun_free(doc);
 }
 
+static void test_unicode_and_chinese(void) {
+  xun_value *doc = NULL;
+  xun_error err;
+  const char *src = "服务名称: 订单处理系统\n端口: !i 8080\n";
+  if (xun_decode(src, &doc, &err) != 0) {
+    fail("decode chinese");
+    return;
+  }
+  expect_str(xun_dict_get(doc, "服务名称"), "订单处理系统", "chinese value");
+  expect_int(xun_dict_get(doc, "端口"), 8080, "chinese int");
+  xun_free(doc);
+}
+
+static void test_full_core_tags(void) {
+  const char *src =
+    "str_plain: hello world\n"
+    "str_special: !s !not_a_tag\n"
+    "num_int: !i 42\n"
+    "num_float: !f 3.14159\n"
+    "num_hex: !x DEAD_BEEF\n"
+    "num_oct: !o 755\n"
+    "flag_t: !b true\n"
+    "flag_f: !b false\n"
+    "bytes_v: !xb FF00AA\n"
+    "b64_v: !b64 SGVsbG8=\n"
+    "char_cp: !c U+4E2D\n";
+  xun_value *doc = NULL;
+  xun_error err;
+  if (xun_decode(src, &doc, &err) != 0) {
+    fail("decode full core tags");
+    return;
+  }
+  expect_str(xun_dict_get(doc, "str_plain"), "hello world", "core str");
+  expect_int(xun_dict_get(doc, "num_int"), 42, "core int");
+  expect_int(xun_dict_get(doc, "num_oct"), 0755, "core oct");
+  const xun_value *bt = xun_dict_get(doc, "flag_t");
+  if (!bt || bt->kind != XUN_BOOL || !bt->u.b) fail("flag_t");
+  const xun_value *bytes = xun_dict_get(doc, "bytes_v");
+  if (!bytes || bytes->kind != XUN_BYTES || bytes->u.bytes.len != 3 || bytes->u.bytes.data[0] != 0xFF) fail("bytes_v");
+  xun_free(doc);
+}
+
+static void test_extreme_indent_errors(void) {
+  expect_err("a:\n   b: 1\n", "3 spaces");
+  expect_err("a:\n\tb: 1\n", "tab");
+  expect_err("a:\n    b: 1\n", "indent jump");
+  expect_err("server:\n  host: 1\n  - item1\n", "mix dict/list");
+}
+
 int main(int argc, char **argv) {
   const char *root = argc > 1 ? argv[1] : "..";
   test_example(root);
@@ -201,6 +250,9 @@ int main(int argc, char **argv) {
   test_encode_roundtrip(root);
   test_file_write_and_read(root);
   test_symmetric_and_unpack();
+  test_unicode_and_chinese();
+  test_full_core_tags();
+  test_extreme_indent_errors();
   expect_err("a: 1\na: 2\n", "duplicate");
   expect_err("x: !f 8080\n", "float");
   expect_err("a: |\n  hi\n", "multiline");

@@ -1253,4 +1253,79 @@ mod tests {
         let ver = dict_get(&decoded, "version").unwrap().as_tagged().unwrap();
         assert_eq!(ver.to_version_parts().unwrap(), vec![3, 10, 1]);
     }
+
+    #[test]
+    fn test_unicode_and_chinese() {
+        let doc = Value::Dict(vec![
+            ("服务名称".into(), Value::String("订单处理系统".into())),
+            ("版本号".into(), Value::Tagged(Tagged { tag: "ver".into(), value: "2.1.0".into() })),
+            ("端口".into(), Value::Int(8080)),
+        ]);
+        let encoded = encode(&doc).unwrap();
+        let decoded = decode(&encoded).unwrap();
+        assert_eq!(doc, decoded);
+        assert_eq!(dict_get(&decoded, "服务名称"), Some(&Value::String("订单处理系统".into())));
+        assert_eq!(dict_get(&decoded, "端口"), Some(&Value::Int(8080)));
+    }
+
+    #[test]
+    fn test_full_20_core_tags() {
+        let raw = "
+str_plain: hello world
+str_special: !s !not_a_tag
+num_int: !i 42
+num_float: !f 3.14159
+num_hex: !x DEAD_BEEF
+num_oct: !o 755
+flag_t: !b true
+flag_f: !b false
+date_v: !d 2026-08-14
+time_v: !t 16:54:00.123
+dt_v: !dt 2026-08-14T16:54:00+08:00
+tz_v: !tz Asia/Shanghai
+dur_v: !du 1d2h30m15s
+sz_v: !sz 10GiB
+unix_v: !unix 1700000000
+ver_v: !ver 3.10.1
+uuid_v: !uuid 12345678-1234-5678-1234-567812345678
+ip4_v: !ip 127.0.0.1
+ip6_v: !ip ::1
+bytes_v: !xb FF00AA
+b64_v: !b64 SGVsbG8=
+char_v: !c A
+char_cp: !c U+4E2D
+custom_v: !sql SELECT * FROM users
+";
+        let doc = decode(raw).unwrap();
+        assert_eq!(dict_get(&doc, "str_plain"), Some(&Value::String("hello world".into())));
+        assert_eq!(dict_get(&doc, "str_special"), Some(&Value::String("!not_a_tag".into())));
+        assert_eq!(dict_get(&doc, "num_int"), Some(&Value::Int(42)));
+        assert_eq!(dict_get(&doc, "num_hex"), Some(&Value::Int(0xdeadbeef)));
+        assert_eq!(dict_get(&doc, "num_oct"), Some(&Value::Int(0o755)));
+        assert_eq!(dict_get(&doc, "flag_t"), Some(&Value::Bool(true)));
+        assert_eq!(dict_get(&doc, "bytes_v"), Some(&Value::Bytes(vec![0xff, 0x00, 0xaa])));
+        assert_eq!(dict_get(&doc, "b64_v"), Some(&Value::Bytes(vec![72, 101, 108, 108, 111])));
+        assert_eq!(dict_get(&doc, "char_cp"), Some(&Value::Tagged(Tagged { tag: "c".into(), value: "中".into() })));
+    }
+
+    #[test]
+    fn test_compact_arrays() {
+        let src = "
+numbers: !n[1, 2, 3, 4]
+floats: !f[1.1, 2.2, 3.3]
+chars: !c[a, b, c]
+";
+        let doc = decode(src).unwrap();
+        let nums = dict_get(&doc, "numbers").unwrap().as_list().unwrap();
+        assert_eq!(nums.len(), 4);
+        assert_eq!(nums[0], Value::Int(1));
+    }
+
+    #[test]
+    fn test_extreme_indent_errors() {
+        assert!(decode("a:\n   b: 1\n").is_err());
+        assert!(decode("a:\n\tb: 1\n").is_err());
+        assert!(decode("a:\n    b: 1\n").is_err());
+        assert!(decode("server:\n  host: 1\n  - item1\n").is_err());
+    }
 }

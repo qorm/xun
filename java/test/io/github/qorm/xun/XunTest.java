@@ -27,11 +27,70 @@ public final class XunTest {
     testEncodeAndRoundTrip();
     testFileWriteAndRead();
     testSymmetricAndUnpack();
+    testUnicodeAndChinese();
+    testFullCoreTags();
+    testExtremeIndentErrors();
     if (failed > 0) {
       System.err.println(failed + " failed");
       System.exit(1);
     }
     System.out.println("ok");
+  }
+
+  static void testUnicodeAndChinese() {
+    Map<String, Object> data = new LinkedHashMap<>();
+    data.put("服务名称", "订单处理系统");
+    data.put("版本号", new Xun.Tagged("ver", "2.1.0"));
+    data.put("端口", 8080L);
+
+    String text = Xun.encode(data);
+    Map<String, Object> doc = Xun.decode(text);
+    eq(doc.get("服务名称"), "订单处理系统", "chinese key/val");
+    eq(doc.get("端口"), 8080L, "chinese dict port");
+  }
+
+  static void testFullCoreTags() {
+    String raw = """
+str_plain: hello world
+str_special: !s !not_a_tag
+num_int: !i 42
+num_float: !f 3.14159
+num_hex: !x DEAD_BEEF
+num_oct: !o 755
+flag_t: !b true
+flag_f: !b false
+date_v: !d 2026-08-14
+time_v: !t 16:54:00.123
+dt_v: !dt 2026-08-14T16:54:00+08:00
+tz_v: !tz Asia/Shanghai
+dur_v: !du 1d2h30m15s
+sz_v: !sz 10GiB
+unix_v: !unix 1700000000
+ver_v: !ver 3.10.1
+uuid_v: !uuid 12345678-1234-5678-1234-567812345678
+ip4_v: !ip 127.0.0.1
+ip6_v: !ip ::1
+bytes_v: !xb FF00AA
+b64_v: !b64 SGVsbG8=
+char_v: !c A
+char_cp: !c U+4E2D
+custom_v: !sql SELECT * FROM users
+""";
+    Map<String, Object> doc = Xun.decode(raw);
+    eq(doc.get("str_plain"), "hello world", "core str");
+    eq(doc.get("num_int"), 42L, "core int");
+    eq(doc.get("num_hex"), 0xDEADBEEFL, "core hex");
+    eq(doc.get("num_oct"), 0755L, "core oct");
+    eq(doc.get("flag_t"), true, "core bool true");
+    eq(doc.get("flag_f"), false, "core bool false");
+    eq(doc.get("char_cp"), new Xun.Tagged("c", "中"), "core char cp");
+  }
+
+  static void testExtremeIndentErrors() {
+    throwsXun("a:\n   b: 1\n", "3 spaces");
+    throwsXun("a:\n\tb: 1\n", "tab indent");
+    throwsXun("a:\n    b: 1\n", "indent jump");
+    throwsXun("server:\n  host: 1\n  - item1\n", "mix dict/list");
   }
 
   static void testSymmetricAndUnpack() throws Exception {
