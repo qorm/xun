@@ -167,6 +167,32 @@ static void test_file_write_and_read(const char *root) {
   xun_free(doc);
 }
 
+static void test_symmetric_and_unpack(void) {
+  uint64_t bytes = 0;
+  if (xun_parse_size_bytes("10MiB", &bytes) != 0 || bytes != 10485760ULL) {
+    fail("xun_parse_size_bytes 10MiB");
+  }
+  uint64_t ms = 0;
+  if (xun_parse_duration_ms("1h30m", &ms) != 0 || ms != 5400000ULL) {
+    fail("xun_parse_duration_ms 1h30m");
+  }
+  int parts[4];
+  size_t count = 0;
+  if (xun_parse_version_parts("3.10.1", parts, 4, &count) != 0 || count != 3 || parts[0] != 3 || parts[1] != 10 || parts[2] != 1) {
+    fail("xun_parse_version_parts 3.10.1");
+  }
+
+  xun_value *doc = NULL;
+  xun_error err;
+  if (xun_decode("server:\n  host: 127.0.0.1\n", &doc, &err) != 0) {
+    fail("xun_decode failed");
+    return;
+  }
+  const xun_value *server = xun_dict_get(doc, "server");
+  expect_str(xun_dict_get(server, "host"), "127.0.0.1", "decode host");
+  xun_free(doc);
+}
+
 int main(int argc, char **argv) {
   const char *root = argc > 1 ? argv[1] : "..";
   test_example(root);
@@ -174,6 +200,7 @@ int main(int argc, char **argv) {
   test_untyped();
   test_encode_roundtrip(root);
   test_file_write_and_read(root);
+  test_symmetric_and_unpack();
   expect_err("a: 1\na: 2\n", "duplicate");
   expect_err("x: !f 8080\n", "float");
   expect_err("a: |\n  hi\n", "multiline");

@@ -3,11 +3,24 @@ import assert from "node:assert/strict";
 import { writeFileSync, readFileSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { encode, stringify, parse, Tagged, XunError } from "../src/xun.js";
+import {
+  encode,
+  decode,
+  stringify,
+  parse,
+  unpack,
+  parseSize,
+  parseDuration,
+  parseVersion,
+  Tagged,
+  XunError,
+} from "../src/xun.js";
 
 test("encode empty dict", () => {
   assert.equal(encode({}), "");
   assert.equal(stringify({}), "");
+  assert.deepEqual(decode(""), {});
+  assert.deepEqual(parse(""), {});
 });
 
 test("encode non-dict root throws error", () => {
@@ -16,7 +29,7 @@ test("encode non-dict root throws error", () => {
   assert.throws(() => encode(123), XunError);
 });
 
-test("encode basic types and round-trip", () => {
+test("encode basic types and decode round-trip", () => {
   const data = {
     str_plain: "hello world",
     str_with_tag: "!not_a_tag",
@@ -30,7 +43,7 @@ test("encode basic types and round-trip", () => {
   };
 
   const text = encode(data);
-  const parsed = parse(text);
+  const parsed = decode(text);
 
   assert.equal(parsed.str_plain, "hello world");
   assert.equal(parsed.str_with_tag, "!not_a_tag");
@@ -41,6 +54,42 @@ test("encode basic types and round-trip", () => {
   assert.equal(parsed.flag_false, false);
   assert.deepEqual(parsed.bytes_val, new Uint8Array([0xde, 0xad, 0xbe, 0xef]));
   assert.deepEqual(parsed.tagged_val, new Tagged("ver", "3.10"));
+});
+
+test("encode native Date and unpack helpers", () => {
+  const d = new Date("2026-08-14T16:54:00.000Z");
+  const data = {
+    time: d,
+    size: new Tagged("sz", "10MiB"),
+    duration: new Tagged("du", "1h30m"),
+    version: new Tagged("ver", "3.10.1"),
+  };
+
+  const text = encode(data);
+  const doc = decode(text);
+
+  assert.equal(doc.time.toDate().toISOString(), d.toISOString());
+  assert.equal(doc.size.toBytesSize(), 10485760);
+  assert.equal(doc.duration.toDurationSeconds(), 5400);
+  assert.deepEqual(doc.version.toVersionParts(), [3, 10, 1]);
+
+  assert.equal(parseSize("3KB"), 3000);
+  assert.equal(parseDuration("1d2h"), 86400 + 7200);
+  assert.deepEqual(parseVersion("1.0.0"), [1, 0, 0]);
+
+  const unpacked = unpack(doc);
+  assert.equal(unpacked.size, 10485760);
+  assert.equal(unpacked.duration, 5400);
+  assert.deepEqual(unpacked.version, [3, 10, 1]);
+});
+
+test("detect circular references in encoder", () => {
+  const a = {};
+  const b = { a };
+  a.b = b;
+  assert.throws(() => encode(a), (err) => {
+    return err instanceof XunError && err.message.includes("circular reference");
+  });
 });
 
 test("encode nested objects and arrays", () => {
@@ -59,7 +108,7 @@ test("encode nested objects and arrays", () => {
   };
 
   const text = encode(data);
-  const parsed = parse(text);
+  const parsed = decode(text);
 
   assert.equal(parsed.server.host, "localhost");
   assert.equal(parsed.server.port, 8080);
@@ -93,7 +142,7 @@ test("file write and read round-trip", () => {
     writeFileSync(tmpFile, text, "utf8");
 
     const readText = readFileSync(tmpFile, "utf8");
-    const doc = parse(readText);
+    const doc = decode(readText);
 
     assert.equal(doc.app, "xun-demo");
     assert.deepEqual(doc.version, new Tagged("ver", "0.1.1"));

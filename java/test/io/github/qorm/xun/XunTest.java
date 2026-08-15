@@ -26,11 +26,46 @@ public final class XunTest {
     testStringCompact();
     testEncodeAndRoundTrip();
     testFileWriteAndRead();
+    testSymmetricAndUnpack();
     if (failed > 0) {
       System.err.println(failed + " failed");
       System.exit(1);
     }
     System.out.println("ok");
+  }
+
+  static void testSymmetricAndUnpack() throws Exception {
+    java.time.Instant now = java.time.Instant.parse("2026-08-14T16:54:00Z");
+    java.util.UUID u = java.util.UUID.fromString("12345678-1234-5678-1234-567812345678");
+
+    Map<String, Object> data = new LinkedHashMap<>();
+    data.put("time", now);
+    data.put("uuid", u);
+    data.put("size", new Xun.Tagged("sz", "10MiB"));
+    data.put("duration", new Xun.Tagged("du", "1h30m"));
+    data.put("version", new Xun.Tagged("ver", "3.10.1"));
+
+    String encoded = Xun.encode(data);
+    Map<String, Object> decoded = Xun.decode(encoded);
+
+    Xun.Tagged tTime = (Xun.Tagged) decoded.get("time");
+    eq(tTime.toInstant(), now, "instant unpack");
+
+    Xun.Tagged tUuid = (Xun.Tagged) decoded.get("uuid");
+    eq(tUuid.toUUID(), u, "uuid unpack");
+
+    Xun.Tagged tSz = (Xun.Tagged) decoded.get("size");
+    eq(tSz.toBytesSize(), 10485760L, "size bytes unpack");
+
+    Xun.Tagged tDu = (Xun.Tagged) decoded.get("duration");
+    eq(tDu.toDuration().getSeconds(), 5400L, "duration unpack");
+
+    Xun.Tagged tVer = (Xun.Tagged) decoded.get("version");
+    int[] parts = tVer.toVersionParts();
+    eq(parts.length, 3, "version parts length");
+    eq(parts[0], 3, "version[0]");
+    eq(parts[1], 10, "version[1]");
+    eq(parts[2], 1, "version[2]");
   }
 
   static void testFileWriteAndRead() throws Exception {

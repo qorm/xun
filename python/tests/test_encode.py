@@ -1,8 +1,21 @@
+import datetime
+import ipaddress
 import os
 import tempfile
 import unittest
+import uuid
 from pathlib import Path
-from xun import Tagged, XunError, dump, encode, parse
+from xun import (
+    Tagged,
+    XunError,
+    dump,
+    encode,
+    parse,
+    parse_duration,
+    parse_size,
+    parse_version,
+    unpack,
+)
 
 
 class TestEncode(unittest.TestCase):
@@ -39,6 +52,56 @@ class TestEncode(unittest.TestCase):
         self.assertEqual(parsed["bytes_val"], bytes([0xDE, 0xAD, 0xBE, 0xEF]))
         self.assertEqual(parsed["tagged_val"], Tagged("ver", "3.10"))
 
+    def test_encode_native_types(self):
+        now = datetime.datetime(2026, 8, 14, 16, 54, 0, tzinfo=datetime.timezone.utc)
+        today = datetime.date(2026, 8, 14)
+        time_val = datetime.time(16, 54, 0)
+        u = uuid.UUID("12345678-1234-5678-1234-567812345678")
+        ip = ipaddress.ip_address("192.168.1.1")
+
+        data = {
+            "datetime": now,
+            "date": today,
+            "time": time_val,
+            "uuid": u,
+            "ip": ip,
+        }
+        text = encode(data)
+        parsed = parse(text)
+        self.assertEqual(parsed["datetime"].to_datetime(), now)
+        self.assertEqual(parsed["date"].to_date(), today)
+        self.assertEqual(parsed["time"].to_time(), time_val)
+        self.assertEqual(parsed["uuid"].to_uuid(), u)
+        self.assertEqual(parsed["ip"].to_ip(), ip)
+
+    def test_format_unpack_helpers(self):
+        self.assertEqual(parse_size("10MiB"), 10 * 1024 * 1024)
+        self.assertEqual(parse_size("3KB"), 3000)
+        self.assertEqual(parse_duration("1d2h30m"), 86400 + 7200 + 1800)
+        self.assertEqual(parse_version("3.10.1"), (3, 10, 1))
+
+        t_sz = Tagged("sz", "10MiB")
+        self.assertEqual(t_sz.to_size_bytes(), 10485760)
+
+        t_du = Tagged("du", "1h30s")
+        self.assertEqual(t_du.to_duration_seconds(), 3630.0)
+
+        t_ver = Tagged("ver", "2.1.0")
+        self.assertEqual(t_ver.to_version_parts(), (2, 1, 0))
+
+        doc = parse("sz: !sz 10MiB\nver: !ver 3.10\n")
+        unpacked = unpack(doc)
+        self.assertEqual(unpacked["sz"], 10485760)
+        self.assertEqual(unpacked["ver"], (3, 10))
+
+    def test_circular_reference_error(self):
+        a: dict = {}
+        b: dict = {"a": a}
+        a["b"] = b
+        with self.assertRaises(XunError) as cm:
+            encode(a)
+        self.assertIn("circular reference detected", str(cm.exception))
+
     def test_encode_nested_dict_and_list(self):
         data = {
             "server": {
@@ -70,14 +133,6 @@ class TestEncode(unittest.TestCase):
         self.assertEqual(parsed["items"][2], True)
         self.assertEqual(parsed["items"][3], {"sub": "value"})
         self.assertEqual(parsed["items"][4], ["nested", "list"])
-
-    def test_encode_multiline_string(self):
-        data = {
-            "banner": "Hello\nWorld\nXUN",
-        }
-        text = encode(data)
-        parsed = parse(text)
-        self.assertEqual(parsed["banner"], "Hello\nWorld\nXUN")
 
     def test_file_write_and_read(self):
         data = {

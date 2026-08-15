@@ -1091,3 +1091,85 @@ int xun_encode_file(const xun_value *v, const char *path) {
   free(str);
   return 0;
 }
+
+int xun_decode(const char *source, xun_value **out, xun_error *err) {
+  return xun_parse(source, out, err);
+}
+
+int xun_decode_file(const char *path, xun_value **out, xun_error *err) {
+  return xun_parse_file(path, out, err);
+}
+
+int xun_parse_size_bytes(const char *s, uint64_t *out_bytes) {
+  if (!s || !out_bytes) return -1;
+  char *end = NULL;
+  double val = strtod(s, &end);
+  if (end == s || !end) return -1;
+  uint64_t mult = 1;
+  if (strcmp(end, "B") == 0) mult = 1ULL;
+  else if (strcmp(end, "KB") == 0) mult = 1000ULL;
+  else if (strcmp(end, "MB") == 0) mult = 1000000ULL;
+  else if (strcmp(end, "GB") == 0) mult = 1000000000ULL;
+  else if (strcmp(end, "TB") == 0) mult = 1000000000000ULL;
+  else if (strcmp(end, "KiB") == 0) mult = 1024ULL;
+  else if (strcmp(end, "MiB") == 0) mult = 1024ULL * 1024ULL;
+  else if (strcmp(end, "GiB") == 0) mult = 1024ULL * 1024ULL * 1024ULL;
+  else if (strcmp(end, "TiB") == 0) mult = 1024ULL * 1024ULL * 1024ULL * 1024ULL;
+  else return -1;
+  *out_bytes = (uint64_t)(val * (double)mult);
+  return 0;
+}
+
+int xun_parse_duration_ms(const char *s, uint64_t *out_ms) {
+  if (!s || !*s || !out_ms) return -1;
+  uint64_t total = 0;
+  const char *p = s;
+  int matched = 0;
+  while (*p) {
+    char *end = NULL;
+    double n = strtod(p, &end);
+    if (end == p || !end) return -1;
+    matched = 1;
+    if (*end == 'd') {
+      total += (uint64_t)(n * 86400.0 * 1000.0);
+      p = end + 1;
+    } else if (*end == 'h') {
+      total += (uint64_t)(n * 3600.0 * 1000.0);
+      p = end + 1;
+    } else if (*end == 'm') {
+      if (end[1] == 's') {
+        total += (uint64_t)n;
+        p = end + 2;
+      } else {
+        total += (uint64_t)(n * 60.0 * 1000.0);
+        p = end + 1;
+      }
+    } else if (*end == 's') {
+      total += (uint64_t)(n * 1000.0);
+      p = end + 1;
+    } else {
+      return -1;
+    }
+  }
+  if (!matched) return -1;
+  *out_ms = total;
+  return 0;
+}
+
+int xun_parse_version_parts(const char *s, int *out_parts, size_t max_parts, size_t *out_count) {
+  if (!s || !*s || !out_parts || !out_count) return -1;
+  size_t count = 0;
+  const char *p = s;
+  while (*p) {
+    if (count >= max_parts) return -1;
+    char *end = NULL;
+    long n = strtol(p, &end, 10);
+    if (end == p || n < 0) return -1;
+    out_parts[count++] = (int)n;
+    if (*end == '.') p = end + 1;
+    else if (*end == '\0') break;
+    else return -1;
+  }
+  *out_count = count;
+  return 0;
+}

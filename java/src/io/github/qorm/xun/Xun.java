@@ -28,6 +28,61 @@ public final class Xun {
       this.value = value;
     }
 
+    public java.time.Instant toInstant() {
+      if (!tag.equals("dt")) throw new Error("cannot convert !" + tag + " to Instant");
+      return java.time.Instant.parse(value);
+    }
+
+    public java.time.LocalDate toLocalDate() {
+      if (!tag.equals("d")) throw new Error("cannot convert !" + tag + " to LocalDate");
+      return java.time.LocalDate.parse(value);
+    }
+
+    public java.time.LocalTime toLocalTime() {
+      if (!tag.equals("t")) throw new Error("cannot convert !" + tag + " to LocalTime");
+      return java.time.LocalTime.parse(value);
+    }
+
+    public java.net.InetAddress toInetAddress() throws Exception {
+      if (!tag.equals("ip")) throw new Error("cannot convert !" + tag + " to InetAddress");
+      return java.net.InetAddress.getByName(value);
+    }
+
+    public java.util.UUID toUUID() {
+      if (!tag.equals("uuid")) throw new Error("cannot convert !" + tag + " to UUID");
+      return java.util.UUID.fromString(value);
+    }
+
+    public byte[] toBytes() {
+      if (tag.equals("xb")) {
+        String s = value.replace("_", "");
+        byte[] arr = new byte[s.length() / 2];
+        for (int i = 0; i < s.length(); i += 2) {
+          arr[i / 2] = (byte) Integer.parseInt(s.substring(i, i + 2), 16);
+        }
+        return arr;
+      }
+      if (tag.equals("b64")) {
+        return Base64.getDecoder().decode(value.replaceAll("\\s+", ""));
+      }
+      throw new Error("cannot convert !" + tag + " to raw bytes");
+    }
+
+    public long toBytesSize() {
+      if (!tag.equals("sz")) throw new Error("cannot convert !" + tag + " to size bytes");
+      return parseSize(value);
+    }
+
+    public java.time.Duration toDuration() {
+      if (!tag.equals("du")) throw new Error("cannot convert !" + tag + " to Duration");
+      return java.time.Duration.ofMillis(parseDurationMs(value));
+    }
+
+    public int[] toVersionParts() {
+      if (!tag.equals("ver")) throw new Error("cannot convert !" + tag + " to version parts");
+      return parseVersion(value);
+    }
+
     @Override
     public boolean equals(Object o) {
       if (this == o) return true;
@@ -45,6 +100,52 @@ public final class Xun {
     public String toString() {
       return "!" + tag + " " + value;
     }
+  }
+
+  public static long parseSize(String s) {
+    Pattern p = Pattern.compile("^(\\d+(?:\\.\\d+)?)(B|KB|MB|GB|TB|KiB|MiB|GiB|TiB)$");
+    Matcher m = p.matcher(s);
+    if (!m.matches()) throw new Error("invalid size format: " + s);
+    double num = Double.parseDouble(m.group(1));
+    String unit = m.group(2);
+    long mult = switch (unit) {
+      case "B" -> 1L;
+      case "KB" -> 1_000L;
+      case "MB" -> 1_000_000L;
+      case "GB" -> 1_000_000_000L;
+      case "TB" -> 1_000_000_000_000L;
+      case "KiB" -> 1024L;
+      case "MiB" -> 1024L * 1024L;
+      case "GiB" -> 1024L * 1024L * 1024L;
+      case "TiB" -> 1024L * 1024L * 1024L * 1024L;
+      default -> throw new Error("unknown unit: " + unit);
+    };
+    return (long) (num * mult);
+  }
+
+  public static long parseDurationMs(String s) {
+    if (s == null || s.isEmpty()) throw new Error("empty duration");
+    Pattern p = Pattern.compile("^(?:(\\d+)d)?(?:(\\d+)h)?(?:(\\d+)m)?(?:(\\d+(?:\\.\\d+)?)s)?$");
+    Matcher m = p.matcher(s);
+    if (!m.matches()) throw new Error("invalid duration format: " + s);
+    long days = m.group(1) != null ? Long.parseLong(m.group(1)) : 0;
+    long hours = m.group(2) != null ? Long.parseLong(m.group(2)) : 0;
+    long minutes = m.group(3) != null ? Long.parseLong(m.group(3)) : 0;
+    double seconds = m.group(4) != null ? Double.parseDouble(m.group(4)) : 0.0;
+    return (days * 86400 + hours * 3600 + minutes * 60) * 1000L + (long) (seconds * 1000.0);
+  }
+
+  public static int[] parseVersion(String s) {
+    String[] parts = s.split("\\.");
+    int[] res = new int[parts.length];
+    for (int i = 0; i < parts.length; i++) {
+      res[i] = Integer.parseInt(parts[i]);
+    }
+    return res;
+  }
+
+  public static Map<String, Object> decode(String source) {
+    return parse(source);
   }
 
   public static final class Error extends RuntimeException {
@@ -589,6 +690,18 @@ public final class Xun {
         lines.add(indent + key + ": !f " + s);
       } else if (v instanceof byte[]) {
         lines.add(indent + key + ": !xb " + hexEncode((byte[]) v).toUpperCase());
+      } else if (v instanceof java.time.Instant) {
+        lines.add(indent + key + ": !dt " + v);
+      } else if (v instanceof java.time.LocalDate) {
+        lines.add(indent + key + ": !d " + v);
+      } else if (v instanceof java.time.LocalTime) {
+        lines.add(indent + key + ": !t " + v);
+      } else if (v instanceof java.util.UUID) {
+        lines.add(indent + key + ": !uuid " + v);
+      } else if (v instanceof java.net.InetAddress) {
+        lines.add(indent + key + ": !ip " + ((java.net.InetAddress) v).getHostAddress());
+      } else if (v instanceof java.util.Date) {
+        lines.add(indent + key + ": !dt " + ((java.util.Date) v).toInstant().toString());
       } else if (v instanceof Tagged) {
         Tagged t = (Tagged) v;
         if (t.value.contains("\n") || t.value.contains("\r")) {
@@ -655,6 +768,18 @@ public final class Xun {
         lines.add(indent + "- !f " + s);
       } else if (v instanceof byte[]) {
         lines.add(indent + "- !xb " + hexEncode((byte[]) v).toUpperCase());
+      } else if (v instanceof java.time.Instant) {
+        lines.add(indent + "- !dt " + v);
+      } else if (v instanceof java.time.LocalDate) {
+        lines.add(indent + "- !d " + v);
+      } else if (v instanceof java.time.LocalTime) {
+        lines.add(indent + "- !t " + v);
+      } else if (v instanceof java.util.UUID) {
+        lines.add(indent + "- !uuid " + v);
+      } else if (v instanceof java.net.InetAddress) {
+        lines.add(indent + "- !ip " + ((java.net.InetAddress) v).getHostAddress());
+      } else if (v instanceof java.util.Date) {
+        lines.add(indent + "- !dt " + ((java.util.Date) v).toInstant().toString());
       } else if (v instanceof Tagged) {
         Tagged t = (Tagged) v;
         if (t.value.contains("\n") || t.value.contains("\r")) {

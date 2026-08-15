@@ -2,10 +2,12 @@ package xun
 
 import (
 	"bytes"
+	"net"
 	"os"
 	"path/filepath"
 	"runtime"
 	"testing"
+	"time"
 )
 
 func testdata(name string) string {
@@ -176,5 +178,55 @@ func TestFileWriteAndRead(t *testing.T) {
 	}
 	if !bytes.Equal(m["bytes"].([]byte), []byte{0x01, 0x02, 0xFE, 0xFF}) {
 		t.Fatalf("bytes mismatch: %v", m["bytes"])
+	}
+}
+
+func TestSymmetricAPIAndUnpack(t *testing.T) {
+	now := time.Date(2026, 8, 14, 16, 54, 0, 0, time.UTC)
+	ip := net.ParseIP("192.168.1.1")
+
+	data := map[string]any{
+		"time":     now,
+		"ip":       ip,
+		"size":     Tagged{Tag: "sz", Value: "10MiB"},
+		"duration": Tagged{Tag: "du", Value: "1h30m"},
+		"version":  Tagged{Tag: "ver", Value: "3.10.1"},
+	}
+
+	marshaled, err := Marshal(data)
+	if err != nil {
+		t.Fatalf("marshal error: %v", err)
+	}
+
+	var result map[string]any
+	if err := Unmarshal(marshaled, &result); err != nil {
+		t.Fatalf("unmarshal error: %v", err)
+	}
+
+	tVal, ok := result["time"].(Tagged)
+	if !ok {
+		t.Fatalf("expected Tagged for time, got %T", result["time"])
+	}
+	parsedTime, err := tVal.AsTime()
+	if err != nil || !parsedTime.Equal(now) {
+		t.Fatalf("time mismatch: %v, err=%v", parsedTime, err)
+	}
+
+	szVal := result["size"].(Tagged)
+	szBytes, err := szVal.AsSizeBytes()
+	if err != nil || szBytes != 10485760 {
+		t.Fatalf("size mismatch: %v, err=%v", szBytes, err)
+	}
+
+	duVal := result["duration"].(Tagged)
+	du, err := duVal.AsDuration()
+	if err != nil || du != 90*time.Minute {
+		t.Fatalf("duration mismatch: %v, err=%v", du, err)
+	}
+
+	verVal := result["version"].(Tagged)
+	verParts, err := verVal.AsVersion()
+	if err != nil || len(verParts) != 3 || verParts[0] != 3 || verParts[1] != 10 || verParts[2] != 1 {
+		t.Fatalf("version mismatch: %v, err=%v", verParts, err)
 	}
 }

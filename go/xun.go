@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 )
 
 const (
@@ -38,6 +39,124 @@ type Tagged struct {
 	Value string
 }
 
+func (t Tagged) AsTime() (time.Time, error) {
+	if t.Tag != "dt" && t.Tag != "d" {
+		return time.Time{}, fmt.Errorf("cannot convert !%s to time.Time", t.Tag)
+	}
+	return time.Parse(time.RFC3339Nano, t.Value)
+}
+
+func (t Tagged) AsIP() (net.IP, error) {
+	if t.Tag != "ip" {
+		return nil, fmt.Errorf("cannot convert !%s to net.IP", t.Tag)
+	}
+	ip := net.ParseIP(t.Value)
+	if ip == nil {
+		return nil, fmt.Errorf("invalid IP: %s", t.Value)
+	}
+	return ip, nil
+}
+
+func (t Tagged) AsBytes() ([]byte, error) {
+	if t.Tag == "xb" {
+		s := strings.ReplaceAll(t.Value, "_", "")
+		return hex.DecodeString(s)
+	}
+	if t.Tag == "b64" {
+		s := regexp.MustCompile(`\s+`).ReplaceAllString(t.Value, "")
+		return base64.StdEncoding.DecodeString(s)
+	}
+	return nil, fmt.Errorf("cannot convert !%s to bytes", t.Tag)
+}
+
+func (t Tagged) AsSizeBytes() (int64, error) {
+	if t.Tag != "sz" {
+		return 0, fmt.Errorf("cannot convert !%s to size bytes", t.Tag)
+	}
+	return ParseSize(t.Value)
+}
+
+func (t Tagged) AsDuration() (time.Duration, error) {
+	if t.Tag != "du" {
+		return 0, fmt.Errorf("cannot convert !%s to duration", t.Tag)
+	}
+	return ParseDuration(t.Value)
+}
+
+func (t Tagged) AsVersion() ([]int, error) {
+	if t.Tag != "ver" {
+		return nil, fmt.Errorf("cannot convert !%s to version", t.Tag)
+	}
+	return ParseVersion(t.Value)
+}
+
+func ParseSize(s string) (int64, error) {
+	units := map[string]int64{
+		"B":   1,
+		"KB":  1000,
+		"MB":  1000 * 1000,
+		"GB":  1000 * 1000 * 1000,
+		"TB":  1000 * 1000 * 1000 * 1000,
+		"KiB": 1024,
+		"MiB": 1024 * 1024,
+		"GiB": 1024 * 1024 * 1024,
+		"TiB": 1024 * 1024 * 1024 * 1024,
+	}
+	re := regexp.MustCompile(`^(\d+(?:\.\d+)?)(B|KB|MB|GB|TB|KiB|MiB|GiB|TiB)$`)
+	matches := re.FindStringSubmatch(s)
+	if len(matches) < 3 {
+		return 0, fmt.Errorf("invalid size format %q", s)
+	}
+	val, err := strconv.ParseFloat(matches[1], 64)
+	if err != nil {
+		return 0, err
+	}
+	unitVal := units[matches[2]]
+	return int64(val * float64(unitVal)), nil
+}
+
+func ParseDuration(s string) (time.Duration, error) {
+	if s == "" {
+		return 0, fmt.Errorf("empty duration")
+	}
+	re := regexp.MustCompile(`^(?:(\d+)d)?(?:(\d+)h)?(?:(\d+)m)?(?:(\d+(?:\.\d+)?)s)?$`)
+	matches := re.FindStringSubmatch(s)
+	if len(matches) == 0 || (matches[1] == "" && matches[2] == "" && matches[3] == "" && matches[4] == "") {
+		return 0, fmt.Errorf("invalid duration format %q", s)
+	}
+	var total time.Duration
+	if matches[1] != "" {
+		d, _ := strconv.Atoi(matches[1])
+		total += time.Duration(d) * 24 * time.Hour
+	}
+	if matches[2] != "" {
+		h, _ := strconv.Atoi(matches[2])
+		total += time.Duration(h) * time.Hour
+	}
+	if matches[3] != "" {
+		m, _ := strconv.Atoi(matches[3])
+		total += time.Duration(m) * time.Minute
+	}
+	if matches[4] != "" {
+		sec, _ := strconv.ParseFloat(matches[4], 64)
+		total += time.Duration(sec * float64(time.Second))
+	}
+	return total, nil
+}
+
+func ParseVersion(s string) ([]int, error) {
+	parts := strings.Split(s, ".")
+	res := make([]int, 0, len(parts))
+	for _, p := range parts {
+		n, err := strconv.Atoi(p)
+		if err != nil {
+			return nil, fmt.Errorf("invalid version %q: %w", s, err)
+		}
+		res = append(res, n)
+	}
+	return res, nil
+}
+
 type line struct {
 	raw    string
 	indent int
@@ -49,6 +168,10 @@ type line struct {
 type parser struct {
 	lines []line
 	i     int
+}
+
+func Decode(source string) (doc any, err error) {
+	return Parse(source)
 }
 
 func Parse(source string) (doc any, err error) {
@@ -615,6 +738,24 @@ func Marshal(v any) ([]byte, error) {
 	return []byte(s), nil
 }
 
+func Unmarshal(data []byte, v any) error {
+	doc, err := Parse(string(data))
+	if err != nil {
+		return err
+	}
+	rv := reflect.ValueOf(v)
+	if rv.Kind() != reflect.Pointer || rv.IsNil() {
+		return fmt.Errorf("xun: Unmarshal requires a non-nil pointer")
+	}
+	elem := rv.Elem()
+	docVal := reflect.ValueOf(doc)
+	if docVal.Type().AssignableTo(elem.Type()) || elem.Kind() == reflect.Interface {
+		elem.Set(docVal)
+		return nil
+	}
+	return fmt.Errorf("xun: cannot unmarshal %T into %T", doc, elem.Interface())
+}
+
 func Encode(v any) (out string, err error) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -687,6 +828,10 @@ func encodeKeyVal(indent, key string, val any, depth int, lines *[]string) {
 		} else {
 			*lines = append(*lines, fmt.Sprintf("%s%s: !%s %s", indent, key, v.Tag, v.Value))
 		}
+	case time.Time:
+		*lines = append(*lines, fmt.Sprintf("%s%s: !dt %s", indent, key, v.Format(time.RFC3339Nano)))
+	case net.IP:
+		*lines = append(*lines, fmt.Sprintf("%s%s: !ip %s", indent, key, v.String()))
 	case []byte:
 		*lines = append(*lines, fmt.Sprintf("%s%s: !xb %s", indent, key, strings.ToUpper(hex.EncodeToString(v))))
 	case string:

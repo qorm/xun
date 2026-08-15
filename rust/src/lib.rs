@@ -16,6 +16,154 @@ pub enum Value {
     Dict(Vec<(String, Value)>),
 }
 
+impl Value {
+    pub fn as_str(&self) -> Option<&str> {
+        match self {
+            Value::String(s) => Some(s),
+            _ => None,
+        }
+    }
+    pub fn as_i64(&self) -> Option<i64> {
+        match self {
+            Value::Int(i) => Some(*i),
+            _ => None,
+        }
+    }
+    pub fn as_f64(&self) -> Option<f64> {
+        match self {
+            Value::Float(f) => Some(*f),
+            _ => None,
+        }
+    }
+    pub fn as_bool(&self) -> Option<bool> {
+        match self {
+            Value::Bool(b) => Some(*b),
+            _ => None,
+        }
+    }
+    pub fn as_bytes(&self) -> Option<&[u8]> {
+        match self {
+            Value::Bytes(b) => Some(b),
+            _ => None,
+        }
+    }
+    pub fn as_dict(&self) -> Option<&[(String, Value)]> {
+        match self {
+            Value::Dict(d) => Some(d),
+            _ => None,
+        }
+    }
+    pub fn as_list(&self) -> Option<&[Value]> {
+        match self {
+            Value::List(l) => Some(l),
+            _ => None,
+        }
+    }
+    pub fn as_tagged(&self) -> Option<&Tagged> {
+        match self {
+            Value::Tagged(t) => Some(t),
+            _ => None,
+        }
+    }
+}
+
+impl Tagged {
+    pub fn to_size_bytes(&self) -> Result<u64, Error> {
+        if self.tag != "sz" {
+            return Err(err(0, format!("cannot convert !{} to size bytes", self.tag)));
+        }
+        parse_size(&self.value)
+    }
+
+    pub fn to_duration_seconds(&self) -> Result<f64, Error> {
+        if self.tag != "du" {
+            return Err(err(0, format!("cannot convert !{} to duration seconds", self.tag)));
+        }
+        parse_duration(&self.value)
+    }
+
+    pub fn to_version_parts(&self) -> Result<Vec<u64>, Error> {
+        if self.tag != "ver" {
+            return Err(err(0, format!("cannot convert !{} to version parts", self.tag)));
+        }
+        parse_version(&self.value)
+    }
+}
+
+pub fn parse_size(s: &str) -> Result<u64, Error> {
+    let units: &[(&str, u64)] = &[
+        ("PiB", 1024 * 1024 * 1024 * 1024 * 1024),
+        ("TiB", 1024 * 1024 * 1024 * 1024),
+        ("GiB", 1024 * 1024 * 1024),
+        ("MiB", 1024 * 1024),
+        ("KiB", 1024),
+        ("PB", 1000 * 1000 * 1000 * 1000 * 1000),
+        ("TB", 1000 * 1000 * 1000 * 1000),
+        ("GB", 1000 * 1000 * 1000),
+        ("MB", 1000 * 1000),
+        ("KB", 1000),
+        ("B", 1),
+    ];
+    for (unit, mult) in units {
+        if let Some(num_str) = s.strip_suffix(unit) {
+            let num: f64 = num_str.parse().map_err(|_| err(0, format!("invalid size number: {s}")))?;
+            return Ok((num * *mult as f64) as u64);
+        }
+    }
+    Err(err(0, format!("invalid size string: {s}")))
+}
+
+pub fn parse_duration(s: &str) -> Result<f64, Error> {
+    if s.is_empty() {
+        return Err(err(0, "empty duration"));
+    }
+    let mut total = 0.0;
+    let mut cur_num = String::new();
+    let mut chars = s.chars().peekable();
+    let mut matched_any = false;
+    while let Some(&c) = chars.peek() {
+        if c.is_ascii_digit() || c == '.' {
+            cur_num.push(c);
+            chars.next();
+        } else {
+            chars.next();
+            if cur_num.is_empty() {
+                return Err(err(0, format!("invalid duration format: {s}")));
+            }
+            let n: f64 = cur_num.parse().map_err(|_| err(0, "invalid duration number"))?;
+            cur_num.clear();
+            matched_any = true;
+            match c {
+                'd' => total += n * 86400.0,
+                'h' => total += n * 3600.0,
+                'm' => {
+                    if let Some(&'s') = chars.peek() {
+                        chars.next();
+                        total += n * 0.001;
+                    } else {
+                        total += n * 60.0;
+                    }
+                }
+                's' => total += n,
+                _ => return Err(err(0, format!("unknown duration unit '{c}' in {s}"))),
+            }
+        }
+    }
+    if !matched_any || !cur_num.is_empty() {
+        return Err(err(0, format!("invalid duration format: {s}")));
+    }
+    Ok(total)
+}
+
+pub fn parse_version(s: &str) -> Result<Vec<u64>, Error> {
+    let mut res = Vec::new();
+    for p in s.split('.') {
+        let n: u64 = p.parse().map_err(|_| err(0, format!("invalid version segment in {s}")))?;
+        res.push(n);
+    }
+    Ok(res)
+}
+
 #[derive(Debug)]
 pub struct Error {
     pub line: usize,
@@ -47,6 +195,14 @@ struct Line {
     text: String,
     n: usize,
     blank: bool,
+}
+
+pub fn decode(source: &str) -> Result<Value, Error> {
+    parse(source)
+}
+
+pub fn from_str(source: &str) -> Result<Value, Error> {
+    parse(source)
 }
 
 pub fn parse(source: &str) -> Result<Value, Error> {
@@ -1074,5 +1230,27 @@ mod tests {
         assert_eq!(doc, parsed);
 
         let _ = std::fs::remove_file(tmp_path);
+    }
+
+    #[test]
+    fn test_symmetric_and_unpack() {
+        let doc = Value::Dict(vec![
+            ("size".into(), Value::Tagged(Tagged { tag: "sz".into(), value: "10MiB".into() })),
+            ("duration".into(), Value::Tagged(Tagged { tag: "du".into(), value: "1h30m".into() })),
+            ("version".into(), Value::Tagged(Tagged { tag: "ver".into(), value: "3.10.1".into() })),
+        ]);
+
+        let encoded = encode(&doc).unwrap();
+        let decoded = decode(&encoded).unwrap();
+        assert_eq!(doc, decoded);
+
+        let sz = dict_get(&decoded, "size").unwrap().as_tagged().unwrap();
+        assert_eq!(sz.to_size_bytes().unwrap(), 10485760);
+
+        let du = dict_get(&decoded, "duration").unwrap().as_tagged().unwrap();
+        assert_eq!(du.to_duration_seconds().unwrap(), 5400.0);
+
+        let ver = dict_get(&decoded, "version").unwrap().as_tagged().unwrap();
+        assert_eq!(ver.to_version_parts().unwrap(), vec![3, 10, 1]);
     }
 }

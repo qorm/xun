@@ -260,44 +260,50 @@ query: !sql |
 
 ## 官方库与 API 支持
 
-XUN 提供了 6 种主流语言的标准实现，均包含完整的 **解析器（Decoder / `parse`）** 与 **编码器（Encoder / `encode`）**，并通过了双向互转（Round-trip）测试。
+XUN 提供了 6 种主流语言的标准实现，全面遵循**对称 API 设计**（`encode` / `decode`、`marshal` / `unmarshal`、`dump` / `load`），内置格式解包工具（Unpack Helpers），并通过了全量双向互转与文件读写测试。
 
-| 语言 | 模块/包路径 | 解析 (Decode) | 编码 (Encode) | 安装/使用方式 |
-| :--- | :--- | :--- | :--- | :--- |
-| **JavaScript** | [`@qorm/xun`](javascript/) | `parse(str)` | `encode(obj)` / `stringify(obj)` | `npm install @qorm/xun` |
-| **Python** | [`xun-format`](python/) | `parse(str)` | `encode(dict)` / `dump(dict, fp)` / `dumps(dict)` | `pip install git+https://github.com/qorm/xun.git#subdirectory=python` |
-| **Go** | [`github.com/qorm/xun/go`](go/) | `xun.Parse(str)` | `xun.Encode(v)` / `xun.Marshal(v)` | `go get github.com/qorm/xun/go` |
-| **Rust** | [`xun`](rust/) | `xun::parse(&str)` | `xun::encode(&val)` / `xun::to_string(&val)` | `xun = { git = "https://github.com/qorm/xun", subdirectory = "rust" }` |
-| **Java** | [`io.github.qorm.xun`](java/) | `Xun.parse(str)` | `Xun.encode(map)` / `Xun.dump(map)` | 引入 `java/src` 源码路径 |
-| **C** | [`c/`](c/) | `xun_parse` / `xun_parse_file` | `xun_encode` / `xun_encode_file` | 编译 `xun.h` / `xun.c` |
+| 语言 | 模块/包路径 | 解码 (Decode / Unmarshal) | 编码 (Encode / Marshal) | 特色能力 | 安装/使用方式 |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **JavaScript** | [`@qorm/xun`](javascript/) | `decode(str)` / `parse(str)` | `encode(obj)` / `stringify(obj)` | 自动识别 `Date`、`unpack` 辅助解包 | `npm install @qorm/xun` |
+| **Python** | [`xun-format`](python/) | `decode(str)` / `load(fp)` / `loads(str)` | `encode(dict)` / `dump(dict, fp)` / `dumps(dict)` | 原生识别 `datetime`/`UUID`/`ip`，`unpack` 递归解包 | `pip install git+https://github.com/qorm/xun.git#subdirectory=python` |
+| **Go** | [`github.com/qorm/xun/go`](go/) | `xun.Decode(str)` / `xun.Unmarshal(b, &v)` | `xun.Encode(v)` / `xun.Marshal(v)` | 支持 `time.Time`、`net.IP`、Tagged 快捷转换方法 | `go get github.com/qorm/xun/go` |
+| **Rust** | [`xun`](rust/) | `xun::decode(&str)` / `xun::from_str(&str)` | `xun::encode(&val)` / `xun::to_string(&val)` | 强类型 `Value` 与 `Tagged` 解包方法 | `xun = { git = "https://github.com/qorm/xun", subdirectory = "rust" }` |
+| **Java** | [`io.github.qorm.xun`](java/) | `Xun.decode(str)` / `Xun.load(path)` | `Xun.encode(map)` / `Xun.dump(map, path)` | 识别 `Instant`/`UUID`/`InetAddress` 等 | 引入 `java/src` 源码路径 |
+| **C** | [`c/`](c/) | `xun_decode` / `xun_decode_file` | `xun_encode` / `xun_encode_file` | 内存池零碎碎片、内置容量/时长/版本解析器 | 编译 `xun.h` / `xun.c` |
 
 ### 代码使用示例
 
 #### JavaScript / TypeScript
 ```js
-import { parse, encode } from "@qorm/xun";
+import { encode, decode, unpack } from "@qorm/xun";
 import { readFileSync, writeFileSync } from "node:fs";
 
-// 解析
-const doc = parse(readFileSync("config.xun", "utf8"));
+// 解码 / 解析
+const doc = decode(readFileSync("config.xun", "utf8"));
 console.log(doc.server.port); // 8080
 
-// 编码
-const output = encode(doc);
+// 辅助解包为原生类型
+const unpacked = unpack(doc);
+
+// 编码 (原生 Date/Uint8Array 自动映射为 !dt / !xb)
+const output = encode(unpacked);
 writeFileSync("output.xun", output, "utf8");
 ```
 
 #### Python
 ```python
 from pathlib import Path
-from xun import parse, encode
+from xun import encode, decode, unpack, dump, load
 
-# 解析
-doc = parse(Path("config.xun").read_text(encoding="utf-8"))
+# 解码 / 加载
+doc = decode(Path("config.xun").read_text(encoding="utf-8"))
 print(doc["server"]["port"])
 
-# 编码
-text = encode(doc)
+# 递归解包为 Python 原生对象 (datetime, UUID, IP, 分段版本)
+native_data = unpack(doc)
+
+# 编码 (原生 datetime/UUID/ip 自动编码为对应 Tag)
+text = encode(native_data)
 Path("output.xun").write_text(text, encoding="utf-8")
 ```
 
@@ -319,30 +325,33 @@ func main() {
 		log.Fatal(err)
 	}
 
-	// 解析
-	doc, err := xun.Parse(string(b))
-	if err != nil {
+	// 解码 / 反序列化
+	var doc map[string]any
+	if err := xun.Unmarshal(b, &doc); err != nil {
 		log.Fatal(err)
 	}
 
-	// 编码
-	encoded, err := xun.Encode(doc)
+	// 编码 / 序列化
+	marshaled, err := xun.Marshal(doc)
 	if err != nil {
 		log.Fatal(err)
 	}
-	fmt.Println(encoded)
+	fmt.Println(string(marshaled))
 }
 ```
 
 #### Rust
 ```rust
-use xun::{parse, encode};
+use xun::{decode, encode, dict_get};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let src = std::fs::read_to_string("config.xun")?;
     
-    // 解析
-    let doc = parse(&src)?;
+    // 解码
+    let doc = decode(&src)?;
+    if let Some(port) = dict_get(&doc, "port") {
+        println!("port: {:?}", port.as_i64());
+    }
     
     // 编码
     let text = encode(&doc)?;
@@ -363,44 +372,42 @@ public class Main {
     public static void main(String[] args) throws Exception {
         String src = Files.readString(Path.of("config.xun"), StandardCharsets.UTF_8);
         
-        // 解析
-        Map<String, Object> doc = Xun.parse(src);
+        // 解码
+        Map<String, Object> doc = Xun.decode(src);
         
         // 编码
         String text = Xun.encode(doc);
-        System.out.println(text);
+        Files.writeString(Path.of("output.xun"), text, StandardCharsets.UTF_8);
     }
 }
 ```
 
 #### C
 ```c
+#include "xun.h"
 #include <stdio.h>
 #include <stdlib.h>
-#include "xun.h"
 
 int main(void) {
     xun_value *doc = NULL;
     xun_error err;
-
-    // 解析
-    if (xun_parse_file("config.xun", &doc, &err) != 0) {
-        fprintf(stderr, "line %d: %s\n", err.line, err.message);
+    
+    // 解码文件
+    if (xun_decode_file("config.xun", &doc, &err) != 0) {
+        fprintf(stderr, "Decode error: %s\n", err.message);
         return 1;
     }
-
-    // 编码
-    char *text = NULL;
-    size_t len = 0;
-    if (xun_encode(doc, &text, &len) == 0) {
-        printf("%s", text);
-        free(text);
+    
+    // 编码写入文件
+    if (xun_encode_file(doc, "output.xun") != 0) {
+        fprintf(stderr, "Encode error\n");
     }
-
+    
     xun_free(doc);
     return 0;
 }
 ```
+
 
 ---
 

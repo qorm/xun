@@ -260,44 +260,50 @@ Follow these rules to ensure 100% compliant XUN generation:
 
 ## Official Libraries & API
 
-Standard implementations are provided for 6 major languages, each with complete **Decoders (`parse`)** and **Encoders (`encode`)**, verified with bidirectional round-trip test suites.
+Standard implementations are provided for 6 major languages, fully adhering to **symmetric API design** (`encode` / `decode`, `marshal` / `unmarshal`, `dump` / `load`), with built-in format unpackers & helpers, verified across bidirectional round-trip and file tests.
 
-| Language | Package / Path | Decode | Encode | Installation / Usage |
-| :--- | :--- | :--- | :--- | :--- |
-| **JavaScript** | [`@qorm/xun`](javascript/) | `parse(str)` | `encode(obj)` / `stringify(obj)` | `npm install @qorm/xun` |
-| **Python** | [`xun-format`](python/) | `parse(str)` | `encode(dict)` / `dump(dict, fp)` / `dumps(dict)` | `pip install git+https://github.com/qorm/xun.git#subdirectory=python` |
-| **Go** | [`github.com/qorm/xun/go`](go/) | `xun.Parse(str)` | `xun.Encode(v)` / `xun.Marshal(v)` | `go get github.com/qorm/xun/go` |
-| **Rust** | [`xun`](rust/) | `xun::parse(&str)` | `xun::encode(&val)` / `xun::to_string(&val)` | `xun = { git = "https://github.com/qorm/xun", subdirectory = "rust" }` |
-| **Java** | [`io.github.qorm.xun`](java/) | `Xun.parse(str)` | `Xun.encode(map)` / `Xun.dump(map)` | Add `java/src` to source path |
-| **C** | [`c/`](c/) | `xun_parse` / `xun_parse_file` | `xun_encode` / `xun_encode_file` | Compile `xun.h` / `xun.c` |
+| Language | Package / Path | Decode / Unmarshal | Encode / Marshal | Highlights | Installation / Usage |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **JavaScript** | [`@qorm/xun`](javascript/) | `decode(str)` / `parse(str)` | `encode(obj)` / `stringify(obj)` | Auto `Date` recognition, `unpack` helpers | `npm install @qorm/xun` |
+| **Python** | [`xun-format`](python/) | `decode(str)` / `load(fp)` / `loads(str)` | `encode(dict)` / `dump(dict, fp)` / `dumps(dict)` | Auto `datetime`/`UUID`/`ip`, recursive `unpack` | `pip install git+https://github.com/qorm/xun.git#subdirectory=python` |
+| **Go** | [`github.com/qorm/xun/go`](go/) | `xun.Decode(str)` / `xun.Unmarshal(b, &v)` | `xun.Encode(v)` / `xun.Marshal(v)` | Supports `time.Time`, `net.IP`, Tagged helpers | `go get github.com/qorm/xun/go` |
+| **Rust** | [`xun`](rust/) | `xun::decode(&str)` / `xun::from_str(&str)` | `xun::encode(&val)` / `xun::to_string(&val)` | Strongly-typed `Value` & `Tagged` extractors | `xun = { git = "https://github.com/qorm/xun", subdirectory = "rust" }` |
+| **Java** | [`io.github.qorm.xun`](java/) | `Xun.decode(str)` / `Xun.load(path)` | `Xun.encode(map)` / `Xun.dump(map, path)` | Auto `Instant`/`UUID`/`InetAddress` mapping | Add `java/src` to source path |
+| **C** | [`c/`](c/) | `xun_decode` / `xun_decode_file` | `xun_encode` / `xun_encode_file` | Arena memory pooling, size/duration/version parsers | Compile `xun.h` / `xun.c` |
 
 ### Code Examples
 
 #### JavaScript / TypeScript
 ```js
-import { parse, encode } from "@qorm/xun";
+import { encode, decode, unpack } from "@qorm/xun";
 import { readFileSync, writeFileSync } from "node:fs";
 
-// Decode
-const doc = parse(readFileSync("config.xun", "utf8"));
+// Decode / Parse
+const doc = decode(readFileSync("config.xun", "utf8"));
 console.log(doc.server.port); // 8080
 
-// Encode
-const output = encode(doc);
+// Unpack to native types
+const unpacked = unpack(doc);
+
+// Encode (native Date/Uint8Array automatically mapped to !dt / !xb)
+const output = encode(unpacked);
 writeFileSync("output.xun", output, "utf8");
 ```
 
 #### Python
 ```python
 from pathlib import Path
-from xun import parse, encode
+from xun import encode, decode, unpack, dump, load
 
-# Decode
-doc = parse(Path("config.xun").read_text(encoding="utf-8"))
+# Decode / Load
+doc = decode(Path("config.xun").read_text(encoding="utf-8"))
 print(doc["server"]["port"])
 
-# Encode
-text = encode(doc)
+# Recursively unpack to native objects (datetime, UUID, IP, version parts)
+native_data = unpack(doc)
+
+# Encode (native datetime/UUID/ip automatically encoded as corresponding Tag)
+text = encode(native_data)
 Path("output.xun").write_text(text, encoding="utf-8")
 ```
 
@@ -319,30 +325,33 @@ func main() {
 		log.Fatal(err)
 	}
 
-	// Decode
-	doc, err := xun.Parse(string(b))
-	if err != nil {
+	// Decode / Unmarshal
+	var doc map[string]any
+	if err := xun.Unmarshal(b, &doc); err != nil {
 		log.Fatal(err)
 	}
 
-	// Encode
-	encoded, err := xun.Encode(doc)
+	// Encode / Marshal
+	marshaled, err := xun.Marshal(doc)
 	if err != nil {
 		log.Fatal(err)
 	}
-	fmt.Println(encoded)
+	fmt.Println(string(marshaled))
 }
 ```
 
 #### Rust
 ```rust
-use xun::{parse, encode};
+use xun::{decode, encode, dict_get};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let src = std::fs::read_to_string("config.xun")?;
     
     // Decode
-    let doc = parse(&src)?;
+    let doc = decode(&src)?;
+    if let Some(port) = dict_get(&doc, "port") {
+        println!("port: {:?}", port.as_i64());
+    }
     
     // Encode
     let text = encode(&doc)?;
@@ -364,43 +373,41 @@ public class Main {
         String src = Files.readString(Path.of("config.xun"), StandardCharsets.UTF_8);
         
         // Decode
-        Map<String, Object> doc = Xun.parse(src);
+        Map<String, Object> doc = Xun.decode(src);
         
         // Encode
         String text = Xun.encode(doc);
-        System.out.println(text);
+        Files.writeString(Path.of("output.xun"), text, StandardCharsets.UTF_8);
     }
 }
 ```
 
 #### C
 ```c
+#include "xun.h"
 #include <stdio.h>
 #include <stdlib.h>
-#include "xun.h"
 
 int main(void) {
     xun_value *doc = NULL;
     xun_error err;
-
-    // Decode
-    if (xun_parse_file("config.xun", &doc, &err) != 0) {
-        fprintf(stderr, "line %d: %s\n", err.line, err.message);
+    
+    // Decode from file
+    if (xun_decode_file("config.xun", &doc, &err) != 0) {
+        fprintf(stderr, "Decode error: %s\n", err.message);
         return 1;
     }
-
-    // Encode
-    char *text = NULL;
-    size_t len = 0;
-    if (xun_encode(doc, &text, &len) == 0) {
-        printf("%s", text);
-        free(text);
+    
+    // Encode to file
+    if (xun_encode_file(doc, "output.xun") != 0) {
+        fprintf(stderr, "Encode error\n");
     }
-
+    
     xun_free(doc);
     return 0;
 }
 ```
+
 
 ---
 
