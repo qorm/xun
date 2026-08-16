@@ -148,7 +148,7 @@ class TestEncode(unittest.TestCase):
     def test_file_write_and_read(self):
         data = {
             "app": "python-xun",
-            "version": Tagged("ver", "0.1.3"),
+            "version": Tagged("ver", "0.1.4"),
             "server": {
                 "host": "127.0.0.1",
                 "port": 8080,
@@ -165,7 +165,7 @@ class TestEncode(unittest.TestCase):
             content = Path(path).read_text(encoding="utf-8")
             doc = parse(content)
             self.assertEqual(doc["app"], "python-xun")
-            self.assertEqual(doc["version"], Tagged("ver", "0.1.3"))
+            self.assertEqual(doc["version"], Tagged("ver", "0.1.4"))
             self.assertEqual(doc["server"]["host"], "127.0.0.1")
             self.assertEqual(doc["server"]["port"], 8080)
             self.assertEqual(doc["features"], ["auth", "rate-limit"])

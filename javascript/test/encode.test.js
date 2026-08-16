@@ -136,7 +136,7 @@ test("encode strips surrounding double-quote pairs", () => {
 test("file write and read round-trip", () => {
   const data = {
     app: "xun-demo",
-    version: new Tagged("ver", "0.1.3"),
+    version: new Tagged("ver", "0.1.4"),
     server: {
       host: "0.0.0.0",
       port: 9000,
@@ -157,7 +157,7 @@ test("file write and read round-trip", () => {
     const doc = decode(readText);
 
     assert.equal(doc.app, "xun-demo");
-    assert.deepEqual(doc.version, new Tagged("ver", "0.1.3"));
+    assert.deepEqual(doc.version, new Tagged("ver", "0.1.4"));
     assert.equal(doc.server.host, "0.0.0.0");
     assert.equal(doc.server.port, 9000);
     assert.equal(doc.server.ssl, true);

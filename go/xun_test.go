@@ -136,7 +136,7 @@ func TestEncodeAndRoundTrip(t *testing.T) {
 func TestFileWriteAndRead(t *testing.T) {
 	data := map[string]any{
 		"app":     "go-xun",
-		"version": Tagged{Tag: "ver", Value: "0.1.3"},
+		"version": Tagged{Tag: "ver", Value: "0.1.4"},
 		"server": map[string]any{
 			"host": "0.0.0.0",
 			"port": int64(9000),
@@ -170,7 +170,7 @@ func TestFileWriteAndRead(t *testing.T) {
 	if m["app"] != "go-xun" {
 		t.Fatalf("app mismatch: %v", m["app"])
 	}
-	if m["version"].(Tagged) != (Tagged{Tag: "ver", Value: "0.1.3"}) {
+	if m["version"].(Tagged) != (Tagged{Tag: "ver", Value: "0.1.4"}) {
 		t.Fatalf("version mismatch: %v", m["version"])
 	}
 	if m["multiline"] != "First\nSecond\nThird" {
