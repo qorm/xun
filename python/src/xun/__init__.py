@@ -7,6 +7,7 @@ import re
 import uuid
 from dataclasses import dataclass
 from typing import Any, TextIO
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 __all__ = [
     "parse",
@@ -92,6 +93,33 @@ class Tagged:
             raise XunError(f"cannot convert !{self.tag} to version parts")
         return parse_version(self.value)
 
+    def to_timezone(self) -> datetime.tzinfo:
+        if self.tag != "tz":
+            raise XunError(f"cannot convert !{self.tag} to timezone")
+        if self.value in {"Z", "UTC"}:
+            return datetime.timezone.utc
+        if re.fullmatch(r"[+-]\d{2}:\d{2}", self.value):
+            sign = 1 if self.value[0] == "+" else -1
+            hh, mm = (int(x) for x in self.value[1:].split(":"))
+            return datetime.timezone(sign * datetime.timedelta(hours=hh, minutes=mm))
+        try:
+            return ZoneInfo(self.value)
+        except (ZoneInfoNotFoundError, ValueError) as e:
+            raise XunError(f"unknown timezone {self.value!r}") from e
+
+    def to_char(self) -> str:
+        if self.tag != "c":
+            raise XunError(f"cannot convert !{self.tag} to char")
+        m = re.fullmatch(r"U\+([0-9A-Fa-f]{4,6})", self.value)
+        if m:
+            cp = int(m.group(1), 16)
+            if cp > 0x10FFFF:
+                raise XunError(f"invalid Unicode code point U+{cp:X}")
+            return chr(cp)
+        if len(self.value) != 1:
+            raise XunError(f"value {self.value!r} is not a single character")
+        return self.value
+
     def to_bytes(self) -> bytes:
         if self.tag == "xb":
             return bytes.fromhex(self.value.replace("_", ""))
@@ -159,6 +187,12 @@ def unpack(v: Any) -> Any:
             return v.to_size_bytes()
         if v.tag == "du":
             return v.to_duration_seconds()
+        if v.tag in {"xb", "b64"}:
+            return v.to_bytes()
+        if v.tag == "c":
+            return v.to_char()
+        if v.tag == "tz":
+            return v.to_timezone()
         return v.value
     if isinstance(v, dict):
         return {k: unpack(val) for k, val in v.items()}
@@ -443,7 +477,10 @@ def apply_tag(tag: str, glyph: str, n: int, source_line: str = "") -> Any:
     if tag == "f":
         return _parse_f(glyph, n, source_line)
     if tag == "x":
-        return int(_strip_underscores(glyph, n, source_line), 16)
+        s = _strip_underscores(glyph, n, source_line)
+        if not re.fullmatch(r"[0-9A-Fa-f]+", s):
+            raise XunError("invalid hex", line=n, source_line=source_line)
+        return int(s, 16)
     if tag == "xb":
         s = glyph.replace("_", "")
         if not re.fullmatch(r"[0-9A-Fa-f]*", s) or len(s) % 2 or not s:
@@ -591,6 +628,10 @@ def _validate_key(key: Any, path: str) -> str:
     return key
 
 
+def _is_ver_tuple(v: Any) -> bool:
+    return isinstance(v, tuple) and all(isinstance(x, int) and not isinstance(x, bool) for x in v)
+
+
 def _encode_dict_items(d: dict[str, Any], depth: int, out: list[str], seen: set[int], path: str) -> None:
     if depth > MAX_DEPTH:
         raise XunError(f"nesting depth exceeds limit of 64 at path '{path}'")
@@ -609,6 +650,8 @@ def _encode_dict_items(d: dict[str, Any], depth: int, out: list[str], seen: set[
                 else:
                     out.append(f"{indent}{key}:")
                     _encode_dict_items(v, depth + 1, out, seen, current_path)
+            elif _is_ver_tuple(v):
+                out.append(f"{indent}{key}: !ver {'.'.join(str(x) for x in v)}")
             elif isinstance(v, (list, tuple)):
                 if not v:
                     out.append(f"{indent}{key}: []")
@@ -638,6 +681,8 @@ def _encode_list_items(items: list[Any] | tuple[Any, ...], depth: int, out: list
                 else:
                     out.append(f"{indent}-")
                     _encode_dict_items(v, depth + 1, out, seen, current_path)
+            elif _is_ver_tuple(v):
+                out.append(f"{indent}- !ver {'.'.join(str(x) for x in v)}")
             elif isinstance(v, (list, tuple)):
                 if not v:
                     out.append(f"{indent}- []")
@@ -650,10 +695,31 @@ def _encode_list_items(items: list[Any] | tuple[Any, ...], depth: int, out: list
         seen.remove(obj_id)
 
 
+def _tz_glyph(v: datetime.tzinfo) -> str:
+    if isinstance(v, ZoneInfo):
+        return v.key
+    offset = v.utcoffset(None)
+    if offset is None:
+        raise XunError("cannot encode a naive timezone")
+    if offset == datetime.timedelta(0):
+        return "Z"
+    total_minutes = int(offset.total_seconds() // 60)
+    sign = "+" if total_minutes >= 0 else "-"
+    total_minutes = abs(total_minutes)
+    return f"{sign}{total_minutes // 60:02d}:{total_minutes % 60:02d}"
+
+
+def _strip_quotes(s: str) -> str:
+    while len(s) >= 2 and s[0] == '"' and s[-1] == '"':
+        s = s[1:-1]
+    return s
+
+
 def _encode_scalar_field(indent: str, key: str, v: Any, out: list[str], path: str) -> None:
     if v is None:
         out.append(f"{indent}{key}:")
     elif isinstance(v, str):
+        v = _strip_quotes(v)
         if "\n" in v or "\r" in v:
             out.append(f"{indent}{key}: |")
             for line in v.splitlines():
@@ -691,6 +757,8 @@ def _encode_scalar_field(indent: str, key: str, v: Any, out: list[str], path: st
         out.append(f"{indent}{key}: !ip {v}")
     elif isinstance(v, uuid.UUID):
         out.append(f"{indent}{key}: !uuid {v}")
+    elif isinstance(v, datetime.tzinfo):
+        out.append(f"{indent}{key}: !tz {_tz_glyph(v)}")
     elif isinstance(v, Tagged):
         if "\n" in v.value or "\r" in v.value:
             out.append(f"{indent}{key}: !{v.tag} |")
@@ -707,6 +775,7 @@ def _encode_scalar_list_item(indent: str, v: Any, out: list[str], path: str) -> 
     if v is None:
         out.append(f"{indent}-")
     elif isinstance(v, str):
+        v = _strip_quotes(v)
         if "\n" in v or "\r" in v:
             out.append(f"{indent}- |")
             for line in v.splitlines():
@@ -743,6 +812,8 @@ def _encode_scalar_list_item(indent: str, v: Any, out: list[str], path: str) -> 
         out.append(f"{indent}- !ip {v}")
     elif isinstance(v, uuid.UUID):
         out.append(f"{indent}- !uuid {v}")
+    elif isinstance(v, datetime.tzinfo):
+        out.append(f"{indent}- !tz {_tz_glyph(v)}")
     elif isinstance(v, Tagged):
         if "\n" in v.value or "\r" in v.value:
             out.append(f"{indent}- !{v.tag} |")

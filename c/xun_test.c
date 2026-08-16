@@ -216,8 +216,20 @@ static void test_full_core_tags(void) {
     "num_oct: !o 755\n"
     "flag_t: !b true\n"
     "flag_f: !b false\n"
+    "date_v: !d 2026-08-14\n"
+    "time_v: !t 16:54:00.123\n"
+    "dt_v: !dt 2026-08-14T16:54:00+08:00\n"
+    "tz_v: !tz Asia/Shanghai\n"
+    "dur_v: !du 1d2h30m15s\n"
+    "sz_v: !sz 10GiB\n"
+    "unix_v: !unix 1700000000\n"
+    "ver_v: !ver 3.10.1\n"
+    "uuid_v: !uuid 12345678-1234-5678-1234-567812345678\n"
+    "ip4_v: !ip 127.0.0.1\n"
+    "ip6_v: !ip ::1\n"
     "bytes_v: !xb FF00AA\n"
     "b64_v: !b64 SGVsbG8=\n"
+    "char_v: !c A\n"
     "char_cp: !c U+4E2D\n";
   xun_value *doc = NULL;
   xun_error err;
@@ -230,9 +242,98 @@ static void test_full_core_tags(void) {
   expect_int(xun_dict_get(doc, "num_oct"), 0755, "core oct");
   const xun_value *bt = xun_dict_get(doc, "flag_t");
   if (!bt || bt->kind != XUN_BOOL || !bt->u.b) fail("flag_t");
+  expect_tagged(xun_dict_get(doc, "date_v"), "d", "2026-08-14", "date_v");
+  expect_tagged(xun_dict_get(doc, "time_v"), "t", "16:54:00.123", "time_v");
+  expect_tagged(xun_dict_get(doc, "dt_v"), "dt", "2026-08-14T16:54:00+08:00", "dt_v");
+  expect_tagged(xun_dict_get(doc, "tz_v"), "tz", "Asia/Shanghai", "tz_v");
+  expect_tagged(xun_dict_get(doc, "dur_v"), "du", "1d2h30m15s", "dur_v");
+  expect_tagged(xun_dict_get(doc, "sz_v"), "sz", "10GiB", "sz_v");
+  expect_int(xun_dict_get(doc, "unix_v"), 1700000000, "unix_v");
+  expect_tagged(xun_dict_get(doc, "ver_v"), "ver", "3.10.1", "ver_v");
+  expect_tagged(xun_dict_get(doc, "uuid_v"), "uuid", "12345678-1234-5678-1234-567812345678", "uuid_v");
+  expect_tagged(xun_dict_get(doc, "ip4_v"), "ip", "127.0.0.1", "ip4_v");
+  expect_tagged(xun_dict_get(doc, "ip6_v"), "ip", "::1", "ip6_v");
   const xun_value *bytes = xun_dict_get(doc, "bytes_v");
   if (!bytes || bytes->kind != XUN_BYTES || bytes->u.bytes.len != 3 || bytes->u.bytes.data[0] != 0xFF) fail("bytes_v");
+  expect_tagged(xun_dict_get(doc, "char_v"), "c", "A", "char_v");
+  expect_tagged(xun_dict_get(doc, "char_cp"), "c", "中", "char_cp");
+
+  /* Encode round-trip of all tags. */
+  char *encoded = NULL;
+  size_t len = 0;
+  if (xun_encode(doc, &encoded, &len) != 0) {
+    fail("encode full core tags");
+    xun_free(doc);
+    return;
+  }
+  xun_value *parsed = NULL;
+  if (xun_parse(encoded, &parsed, &err) != 0) {
+    fail("re-parse encoded core tags");
+    free(encoded);
+    xun_free(doc);
+    return;
+  }
+  expect_tagged(xun_dict_get(parsed, "uuid_v"), "uuid", "12345678-1234-5678-1234-567812345678", "rt uuid");
+  expect_tagged(xun_dict_get(parsed, "ip6_v"), "ip", "::1", "rt ip6");
+  expect_tagged(xun_dict_get(parsed, "ver_v"), "ver", "3.10.1", "rt ver");
+  expect_tagged(xun_dict_get(parsed, "char_cp"), "c", "中", "rt char_cp");
+  expect_tagged(xun_dict_get(parsed, "dt_v"), "dt", "2026-08-14T16:54:00+08:00", "rt dt");
+  const xun_value *rt_bytes = xun_dict_get(parsed, "bytes_v");
+  if (!rt_bytes || rt_bytes->kind != XUN_BYTES || rt_bytes->u.bytes.len != 3 || rt_bytes->u.bytes.data[0] != 0xFF) fail("rt bytes_v");
+  free(encoded);
+  xun_free(parsed);
   xun_free(doc);
+}
+
+static void test_invalid_glyphs_all_tags(void) {
+  expect_err("a: !i 1.5\n", "invalid i");
+  expect_err("a: !f 8080\n", "invalid f");
+  expect_err("a: !x XYZ\n", "invalid x");
+  expect_err("a: !xb F0A\n", "invalid xb");
+  expect_err("a: !o 89\n", "invalid o");
+  expect_err("a: !b yes\n", "invalid b");
+  expect_err("a: !d 2026/08/14\n", "invalid d");
+  expect_err("a: !t 4pm\n", "invalid t");
+  expect_err("a: !dt 2026-08-14T16:54:00\n", "invalid dt");
+  expect_err("a: !tz CST\n", "invalid tz");
+  expect_err("a: !du 90 minutes\n", "invalid du");
+  expect_err("a: !sz 10m\n", "invalid sz");
+  expect_err("a: !unix 01692000000\n", "invalid unix");
+  expect_err("a: !ver 3.10.beta\n", "invalid ver");
+  expect_err("a: !uuid 12345678-1234-5678-1234-5678123456\n", "invalid uuid");
+  expect_err("a: !ip 127.0.0.1:80\n", "invalid ip");
+  expect_err("a: !b64 not_base64!!\n", "invalid b64");
+  expect_err("a: !c ab\n", "invalid c");
+}
+
+static void test_uuid_ip_unpackers(void) {
+  uint8_t uuid[16];
+  const uint8_t want_uuid[16] = {0x12, 0x34, 0x56, 0x78, 0x12, 0x34, 0x56, 0x78,
+                                 0x12, 0x34, 0x56, 0x78, 0x12, 0x34, 0x56, 0x78};
+  if (xun_parse_uuid("12345678-1234-5678-1234-567812345678", uuid) != 0 || memcmp(uuid, want_uuid, 16) != 0) {
+    fail("xun_parse_uuid valid");
+  }
+  if (xun_parse_uuid("12345678-1234-5678-1234-56781234567", uuid) == 0) fail("xun_parse_uuid too short");
+  if (xun_parse_uuid("12345678-1234-5678-1234-56781234567X", uuid) == 0) fail("xun_parse_uuid bad hex");
+
+  uint8_t ip[16];
+  int is_v6 = -1;
+  if (xun_parse_ip("127.0.0.1", ip, &is_v6) != 0 || is_v6 != 0 ||
+      ip[0] != 127 || ip[1] != 0 || ip[2] != 0 || ip[3] != 1) {
+    fail("xun_parse_ip v4");
+  }
+  if (xun_parse_ip("127.0.0.256", ip, &is_v6) == 0) fail("xun_parse_ip v4 range");
+  if (xun_parse_ip("01.2.3.4", ip, &is_v6) == 0) fail("xun_parse_ip v4 leading zero");
+  if (xun_parse_ip("::1", ip, &is_v6) != 0 || is_v6 != 1 || ip[15] != 1) {
+    fail("xun_parse_ip v6 ::1");
+  }
+  if (xun_parse_ip("2001:db8::1", ip, &is_v6) != 0 || is_v6 != 1 ||
+      ip[0] != 0x20 || ip[1] != 0x01 || ip[2] != 0x0d || ip[3] != 0xb8 || ip[14] != 0 || ip[15] != 1) {
+    fail("xun_parse_ip v6 2001:db8::1");
+  }
+  if (xun_parse_ip("::", ip, &is_v6) != 0 || is_v6 != 1) fail("xun_parse_ip v6 ::");
+  if (xun_parse_ip("1::2::3", ip, &is_v6) == 0) fail("xun_parse_ip double ::");
+  if (xun_parse_ip("127.0.0.1:80", ip, &is_v6) == 0) fail("xun_parse_ip with port");
 }
 
 static void test_extreme_indent_errors(void) {
@@ -240,6 +341,30 @@ static void test_extreme_indent_errors(void) {
   expect_err("a:\n\tb: 1\n", "tab");
   expect_err("a:\n    b: 1\n", "indent jump");
   expect_err("server:\n  host: 1\n  - item1\n", "mix dict/list");
+}
+
+static void test_encode_strips_surrounding_quotes(void) {
+  xun_value *doc = NULL;
+  xun_error err;
+  const char *src = "a: \"hello\"\nb: \"\"\nc: \"x\"\nitems:\n  - \"p\"\n  - \"q\"\n";
+  if (xun_parse(src, &doc, &err) != 0) {
+    fail("quote strip parse");
+    return;
+  }
+  char *encoded = NULL;
+  size_t len = 0;
+  if (xun_encode(doc, &encoded, &len) != 0) {
+    fail("quote strip encode");
+    xun_free(doc);
+    return;
+  }
+  const char *want = "a: hello\nb:\nc: x\nitems:\n  - p\n  - q\n";
+  if (strcmp(encoded, want) != 0) {
+    fprintf(stderr, "quote strip got: %s\nwant: %s\n", encoded, want);
+    fail("quote strip mismatch");
+  }
+  free(encoded);
+  xun_free(doc);
 }
 
 int main(int argc, char **argv) {
@@ -252,6 +377,9 @@ int main(int argc, char **argv) {
   test_symmetric_and_unpack();
   test_unicode_and_chinese();
   test_full_core_tags();
+  test_invalid_glyphs_all_tags();
+  test_uuid_ip_unpackers();
+  test_encode_strips_surrounding_quotes();
   test_extreme_indent_errors();
   expect_err("a: 1\na: 2\n", "duplicate");
   expect_err("x: !f 8080\n", "float");

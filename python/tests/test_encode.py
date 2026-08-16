@@ -134,6 +134,17 @@ class TestEncode(unittest.TestCase):
         self.assertEqual(parsed["items"][3], {"sub": "value"})
         self.assertEqual(parsed["items"][4], ["nested", "list"])
 
+    def test_encode_strips_surrounding_quotes(self):
+        self.assertEqual(encode({"a": '"hello"'}), "a: hello\n")
+        self.assertEqual(encode({"a": '""hello world""'}), "a: hello world\n")
+        self.assertEqual(encode({"a": '""'}), "a:\n")
+        self.assertEqual(encode({"a": '"!x"'}), "a: !s !x\n")
+        self.assertEqual(encode({"a": '"'}), 'a: "\n')
+        self.assertEqual(encode({"a": '"unclosed'}), 'a: "unclosed\n')
+        self.assertEqual(encode({"items": ['"a"', '"b"']}), "items:\n  - a\n  - b\n")
+        # Tagged values are never stripped.
+        self.assertEqual(encode({"a": Tagged("s", '"keep"')}), 'a: !s "keep"\n')
+
     def test_file_write_and_read(self):
         data = {
             "app": "python-xun",

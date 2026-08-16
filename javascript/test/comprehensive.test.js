@@ -181,6 +181,62 @@ list_of_empties:
   assert.deepEqual(doc.list_of_empties, [{}, [], "simple"]);
 });
 
+test("unpack covers all tag formats", () => {
+  const raw = `
+str_plain: hello world
+num_int: !i 42
+num_hex: !x DEAD_BEEF
+num_oct: !o 755
+flag: !b true
+date_v: !d 2026-08-14
+time_v: !t 16:54:00.123
+dt_v: !dt 2026-08-14T16:54:00+08:00
+tz_v: !tz Asia/Shanghai
+dur_v: !du 1d2h30m15s
+sz_v: !sz 10MiB
+unix_v: !unix 1700000000
+ver_v: !ver 3.10.1
+uuid_v: !uuid 12345678-1234-5678-1234-567812345678
+ip_v: !ip ::1
+bytes_v: !xb FF00AA
+b64_v: !b64 SGVsbG8=
+char_v: !c A
+char_cp: !c U+4E2D
+custom_v: !sql SELECT 1
+`;
+  const native = unpack(decode(raw));
+  assert.equal(native.str_plain, "hello world");
+  assert.equal(native.num_int, 42);
+  assert.equal(native.num_hex, 0xdeadbeef);
+  assert.equal(native.num_oct, 0o755);
+  assert.equal(native.flag, true);
+  assert.equal(native.date_v.toISOString().slice(0, 10), "2026-08-14");
+  assert.equal(native.time_v, "16:54:00.123");
+  assert.equal(native.dt_v.toISOString(), "2026-08-14T08:54:00.000Z");
+  assert.equal(native.tz_v, "Asia/Shanghai");
+  assert.equal(native.dur_v, 1 * 86400 + 2 * 3600 + 30 * 60 + 15);
+  assert.equal(native.sz_v, 10485760);
+  assert.equal(native.unix_v, 1700000000);
+  assert.deepEqual(native.ver_v, [3, 10, 1]);
+  assert.equal(native.uuid_v, "12345678-1234-5678-1234-567812345678");
+  assert.equal(native.ip_v, "::1");
+  assert.deepEqual(native.bytes_v, new Uint8Array([0xff, 0x00, 0xaa]));
+  assert.deepEqual(native.b64_v, new Uint8Array([72, 101, 108, 108, 111]));
+  assert.equal(native.char_v, "A");
+  assert.equal(native.char_cp, "中");
+  assert.equal(native.custom_v, "SELECT 1");
+});
+
+test("Tagged toUUID/toIP/toChar helpers", () => {
+  assert.equal(new Tagged("uuid", "12345678-1234-5678-1234-567812345678").toUUID(), "12345678-1234-5678-1234-567812345678");
+  assert.throws(() => new Tagged("uuid", "12345678-1234-5678-1234-5678123456").toUUID(), XunError);
+  assert.equal(new Tagged("ip", "::1").toIP(), "::1");
+  assert.throws(() => new Tagged("ip", "127.0.0.1:80").toIP(), XunError);
+  assert.equal(new Tagged("c", "A").toChar(), "A");
+  assert.equal(new Tagged("c", "U+4E2D").toChar(), "中");
+  assert.throws(() => new Tagged("c", "ab").toChar(), XunError);
+});
+
 test("Deep nesting and boundary recursion", () => {
   let nestedObj = { value: "deepest" };
   for (let i = 0; i < 20; i++) {

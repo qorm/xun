@@ -40,10 +40,20 @@ type Tagged struct {
 }
 
 func (t Tagged) AsTime() (time.Time, error) {
-	if t.Tag != "dt" && t.Tag != "d" {
-		return time.Time{}, fmt.Errorf("cannot convert !%s to time.Time", t.Tag)
+	switch t.Tag {
+	case "dt":
+		return time.Parse(time.RFC3339Nano, t.Value)
+	case "d":
+		return time.Parse("2006-01-02", t.Value)
+	case "t":
+		for _, layout := range []string{"15:04:05.999999999", "15:04:05", "15:04"} {
+			if tm, err := time.Parse(layout, t.Value); err == nil {
+				return tm, nil
+			}
+		}
+		return time.Time{}, fmt.Errorf("invalid time value %q", t.Value)
 	}
-	return time.Parse(time.RFC3339Nano, t.Value)
+	return time.Time{}, fmt.Errorf("cannot convert !%s to time.Time", t.Tag)
 }
 
 func (t Tagged) AsIP() (net.IP, error) {
@@ -55,6 +65,41 @@ func (t Tagged) AsIP() (net.IP, error) {
 		return nil, fmt.Errorf("invalid IP: %s", t.Value)
 	}
 	return ip, nil
+}
+
+func (t Tagged) AsUUID() ([16]byte, error) {
+	if t.Tag != "uuid" {
+		return [16]byte{}, fmt.Errorf("cannot convert !%s to UUID", t.Tag)
+	}
+	compact := strings.ReplaceAll(t.Value, "-", "")
+	if len(compact) != 32 {
+		return [16]byte{}, fmt.Errorf("invalid UUID: %s", t.Value)
+	}
+	raw, err := hex.DecodeString(compact)
+	if err != nil {
+		return [16]byte{}, fmt.Errorf("invalid UUID: %s", t.Value)
+	}
+	var out [16]byte
+	copy(out[:], raw)
+	return out, nil
+}
+
+func (t Tagged) AsChar() (rune, error) {
+	if t.Tag != "c" {
+		return 0, fmt.Errorf("cannot convert !%s to char", t.Tag)
+	}
+	if m := cpRe.FindStringSubmatch(t.Value); m != nil {
+		cp, err := strconv.ParseInt(m[1], 16, 32)
+		if err != nil || cp > 0x10ffff {
+			return 0, fmt.Errorf("invalid code point %q", t.Value)
+		}
+		return rune(cp), nil
+	}
+	runes := []rune(t.Value)
+	if len(runes) != 1 {
+		return 0, fmt.Errorf("value %q is not a single character", t.Value)
+	}
+	return runes[0], nil
 }
 
 func (t Tagged) AsBytes() ([]byte, error) {
@@ -811,6 +856,14 @@ func encodeMap(rv reflect.Value, depth int, lines *[]string) {
 	}
 }
 
+// stripSurroundingQuotes removes paired double quotes from both ends, repeatedly.
+func stripSurroundingQuotes(s string) string {
+	for len(s) >= 2 && strings.HasPrefix(s, "\"") && strings.HasSuffix(s, "\"") {
+		s = s[1 : len(s)-1]
+	}
+	return s
+}
+
 func encodeKeyVal(indent, key string, val any, depth int, lines *[]string) {
 	if val == nil {
 		*lines = append(*lines, fmt.Sprintf("%s%s:", indent, key))
@@ -835,6 +888,7 @@ func encodeKeyVal(indent, key string, val any, depth int, lines *[]string) {
 	case []byte:
 		*lines = append(*lines, fmt.Sprintf("%s%s: !xb %s", indent, key, strings.ToUpper(hex.EncodeToString(v))))
 	case string:
+		v = stripSurroundingQuotes(v)
 		if strings.ContainsAny(v, "\n\r") {
 			*lines = append(*lines, fmt.Sprintf("%s%s: |", indent, key))
 			for _, line := range strings.Split(strings.ReplaceAll(v, "\r\n", "\n"), "\n") {
@@ -920,6 +974,7 @@ func encodeListItem(indent string, val any, depth int, lines *[]string) {
 	case []byte:
 		*lines = append(*lines, fmt.Sprintf("%s- !xb %s", indent, strings.ToUpper(hex.EncodeToString(v))))
 	case string:
+		v = stripSurroundingQuotes(v)
 		if strings.ContainsAny(v, "\n\r") {
 			*lines = append(*lines, fmt.Sprintf("%s- |", indent))
 			for _, line := range strings.Split(strings.ReplaceAll(v, "\r\n", "\n"), "\n") {

@@ -88,6 +88,202 @@ impl Tagged {
         }
         parse_version(&self.value)
     }
+
+    pub fn to_date(&self) -> Result<Date, Error> {
+        if self.tag != "d" {
+            return Err(err(0, format!("cannot convert !{} to date", self.tag)));
+        }
+        parse_date(&self.value)
+    }
+
+    pub fn to_time(&self) -> Result<Time, Error> {
+        if self.tag != "t" {
+            return Err(err(0, format!("cannot convert !{} to time", self.tag)));
+        }
+        parse_time(&self.value)
+    }
+
+    pub fn to_datetime(&self) -> Result<DateTime, Error> {
+        if self.tag != "dt" {
+            return Err(err(0, format!("cannot convert !{} to datetime", self.tag)));
+        }
+        parse_datetime(&self.value)
+    }
+
+    pub fn to_ip(&self) -> Result<std::net::IpAddr, Error> {
+        if self.tag != "ip" {
+            return Err(err(0, format!("cannot convert !{} to IP address", self.tag)));
+        }
+        self.value
+            .parse::<std::net::IpAddr>()
+            .map_err(|_| err(0, format!("invalid IP address: {}", self.value)))
+    }
+
+    pub fn to_uuid(&self) -> Result<[u8; 16], Error> {
+        if self.tag != "uuid" {
+            return Err(err(0, format!("cannot convert !{} to UUID", self.tag)));
+        }
+        parse_uuid(&self.value)
+    }
+
+    pub fn to_char(&self) -> Result<char, Error> {
+        if self.tag != "c" {
+            return Err(err(0, format!("cannot convert !{} to char", self.tag)));
+        }
+        parse_char(&self.value)
+    }
+}
+
+/// Calendar date (YYYY-MM-DD).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Date {
+    pub year: i32,
+    pub month: u32,
+    pub day: u32,
+}
+
+/// Clock time (HH:MM[:SS[.fraction]]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Time {
+    pub hour: u32,
+    pub minute: u32,
+    pub second: u32,
+    pub nanos: u32,
+}
+
+/// ISO 8601 datetime with a timezone offset, as in RFC 3339.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DateTime {
+    pub year: i32,
+    pub month: u32,
+    pub day: u32,
+    pub hour: u32,
+    pub minute: u32,
+    pub second: u32,
+    pub nanos: u32,
+    pub offset_seconds: i32,
+}
+
+fn parse_fixed_digits(s: &str) -> Option<u32> {
+    if !s.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    s.parse::<u32>().ok()
+}
+
+pub fn parse_date(s: &str) -> Result<Date, Error> {
+    let mut parts = s.splitn(3, '-');
+    let y = parts.next().unwrap_or("");
+    let m = parts.next().unwrap_or("");
+    let d = parts.next().unwrap_or("");
+    if parts.next().is_some() || y.len() != 4 || m.len() != 2 || d.len() != 2 {
+        return Err(err(0, format!("invalid date: {s}")));
+    }
+    let year = parse_fixed_digits(y)
+        .ok_or_else(|| err(0, format!("invalid date: {s}")))?
+        .try_into()
+        .map_err(|_| err(0, format!("invalid date: {s}")))?;
+    let month = parse_fixed_digits(m).ok_or_else(|| err(0, format!("invalid date: {s}")))?;
+    let day = parse_fixed_digits(d).ok_or_else(|| err(0, format!("invalid date: {s}")))?;
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        return Err(err(0, format!("invalid date: {s}")));
+    }
+    Ok(Date { year, month, day })
+}
+
+pub fn parse_time(s: &str) -> Result<Time, Error> {
+    let (base, frac) = match s.split_once('.') {
+        Some((b, f)) => (b, f),
+        None => (s, ""),
+    };
+    let parts: Vec<&str> = base.split(':').collect();
+    if parts.len() != 2 && parts.len() != 3 {
+        return Err(err(0, format!("invalid time: {s}")));
+    }
+    let hour = parse_fixed_digits(parts[0]).ok_or_else(|| err(0, format!("invalid time: {s}")))?;
+    let minute = parse_fixed_digits(parts[1]).ok_or_else(|| err(0, format!("invalid time: {s}")))?;
+    let second = if parts.len() == 3 {
+        parse_fixed_digits(parts[2]).ok_or_else(|| err(0, format!("invalid time: {s}")))?
+    } else {
+        0
+    };
+    if hour > 23 || minute > 59 || second > 59 {
+        return Err(err(0, format!("invalid time: {s}")));
+    }
+    let nanos = if frac.is_empty() {
+        0
+    } else {
+        let mut frac = frac.to_string();
+        if frac.len() > 9 {
+            frac.truncate(9);
+        }
+        while frac.len() < 9 {
+            frac.push('0');
+        }
+        frac.parse::<u32>().map_err(|_| err(0, format!("invalid time: {s}")))?
+    };
+    Ok(Time { hour, minute, second, nanos })
+}
+
+pub fn parse_datetime(s: &str) -> Result<DateTime, Error> {
+    let (date_part, rest) = s.split_once('T').ok_or_else(|| err(0, format!("invalid datetime: {s}")))?;
+    let date = parse_date(date_part)?;
+    let (time_part, offset_part) = if let Some(stripped) = rest.strip_suffix('Z') {
+        (stripped, 0i32)
+    } else if let Some(idx) = rest.rfind(|c| c == '+' || c == '-') {
+        if idx == 0 {
+            return Err(err(0, format!("invalid datetime: {s}")));
+        }
+        let (t, off) = (&rest[..idx], &rest[idx..]);
+        let sign = if off.starts_with('-') { -1 } else { 1 };
+        let mut op = off[1..].split(':');
+        let oh = parse_fixed_digits(op.next().unwrap_or(""))
+            .ok_or_else(|| err(0, format!("invalid datetime: {s}")))?;
+        let om = parse_fixed_digits(op.next().unwrap_or(""))
+            .ok_or_else(|| err(0, format!("invalid datetime: {s}")))?;
+        if op.next().is_some() || oh > 23 || om > 59 {
+            return Err(err(0, format!("invalid datetime: {s}")));
+        }
+        (t, sign * (oh as i32 * 3600 + om as i32 * 60))
+    } else {
+        return Err(err(0, format!("invalid datetime: {s}")));
+    };
+    let time = parse_time(time_part)?;
+    Ok(DateTime {
+        year: date.year,
+        month: date.month,
+        day: date.day,
+        hour: time.hour,
+        minute: time.minute,
+        second: time.second,
+        nanos: time.nanos,
+        offset_seconds: offset_part,
+    })
+}
+
+pub fn parse_uuid(s: &str) -> Result<[u8; 16], Error> {
+    let compact: String = s.chars().filter(|c| *c != '-').collect();
+    if compact.len() != 32 {
+        return Err(err(0, format!("invalid UUID: {s}")));
+    }
+    let mut out = [0u8; 16];
+    for i in 0..16 {
+        let byte_str = &compact[i * 2..i * 2 + 2];
+        out[i] = u8::from_str_radix(byte_str, 16).map_err(|_| err(0, format!("invalid UUID: {s}")))?;
+    }
+    Ok(out)
+}
+
+pub fn parse_char(s: &str) -> Result<char, Error> {
+    if let Some(hex) = s.strip_prefix("U+") {
+        let cp = u32::from_str_radix(hex, 16).map_err(|_| err(0, format!("invalid code point: {s}")))?;
+        return char::from_u32(cp).ok_or_else(|| err(0, format!("invalid code point: {s}")));
+    }
+    let mut chars = s.chars();
+    match (chars.next(), chars.next()) {
+        (Some(c), None) => Ok(c),
+        _ => Err(err(0, format!("value '{s}' is not a single character"))),
+    }
 }
 
 pub fn parse_size(s: &str) -> Result<u64, Error> {
@@ -994,6 +1190,15 @@ fn validate_key(k: &str) -> Result<(), Error> {
     Ok(())
 }
 
+/// Strip paired double quotes from both ends, repeatedly.
+fn strip_surrounding_quotes(s: &str) -> &str {
+    let mut out = s;
+    while out.len() >= 2 && out.starts_with('"') && out.ends_with('"') {
+        out = &out[1..out.len() - 1];
+    }
+    out
+}
+
 fn encode_dict(pairs: &[(String, Value)], depth: usize, lines: &mut Vec<String>) -> Result<(), Error> {
     if depth > 64 {
         return Err(err(0, "nesting depth exceeds limit"));
@@ -1019,6 +1224,7 @@ fn encode_dict(pairs: &[(String, Value)], depth: usize, lines: &mut Vec<String>)
                 }
             }
             Value::String(s) => {
+                let s = strip_surrounding_quotes(s);
                 if s.contains(['\n', '\r']) {
                     lines.push(format!("{indent}{k}: |"));
                     for line in s.lines() {
@@ -1089,6 +1295,7 @@ fn encode_list(items: &[Value], depth: usize, lines: &mut Vec<String>) -> Result
                 }
             }
             Value::String(s) => {
+                let s = strip_surrounding_quotes(s);
                 if s.contains(['\n', '\r']) {
                     lines.push(format!("{indent}- |"));
                     for line in s.lines() {
@@ -1210,6 +1417,22 @@ mod tests {
     }
 
     #[test]
+    fn encode_strips_surrounding_quotes() {
+        let doc = Value::Dict(vec![
+            ("a".into(), Value::String("\"hello\"".into())),
+            ("b".into(), Value::String("\"\"".into())),
+            ("c".into(), Value::String("\"!x\"".into())),
+            ("items".into(), Value::List(vec![
+                Value::String("\"p\"".into()),
+                Value::String("\"q\"".into()),
+            ])),
+            ("keep".into(), Value::Tagged(Tagged { tag: "s".into(), value: "\"keep\"".into() })),
+        ]);
+        let text = encode(&doc).unwrap();
+        assert_eq!(text, "a: hello\nb:\nc: !s !x\nitems:\n  - p\n  - q\nkeep: !s \"keep\"\n");
+    }
+
+    #[test]
     fn file_write_and_read() {
         let doc = Value::Dict(vec![
             ("app".into(), Value::String("rust-xun".into())),
@@ -1327,5 +1550,95 @@ chars: !c[a, b, c]
         assert!(decode("a:\n\tb: 1\n").is_err());
         assert!(decode("a:\n    b: 1\n").is_err());
         assert!(decode("server:\n  host: 1\n  - item1\n").is_err());
+    }
+
+    #[test]
+    fn unpack_all_formats() {
+        let raw = "
+date_v: !d 2026-08-14
+time_v: !t 16:54:00.123
+dt_v: !dt 2026-08-14T16:54:00+08:00
+tz_v: !tz Asia/Shanghai
+dur_v: !du 1d2h30m15s
+sz_v: !sz 10MiB
+unix_v: !unix 1700000000
+ver_v: !ver 3.10.1
+uuid_v: !uuid 12345678-1234-5678-1234-567812345678
+ip_v: !ip ::1
+char_v: !c A
+char_cp: !c U+4E2D
+";
+        let doc = decode(raw).unwrap();
+        let t = |k: &str| dict_get(&doc, k).unwrap().as_tagged().unwrap().clone();
+
+        assert_eq!(t("date_v").to_date().unwrap(), Date { year: 2026, month: 8, day: 14 });
+        assert_eq!(
+            t("time_v").to_time().unwrap(),
+            Time { hour: 16, minute: 54, second: 0, nanos: 123_000_000 }
+        );
+        assert_eq!(
+            t("dt_v").to_datetime().unwrap(),
+            DateTime {
+                year: 2026,
+                month: 8,
+                day: 14,
+                hour: 16,
+                minute: 54,
+                second: 0,
+                nanos: 0,
+                offset_seconds: 8 * 3600,
+            }
+        );
+        assert_eq!(t("dt_v").to_datetime().unwrap().offset_seconds, 8 * 3600);
+        assert_eq!(t("ip_v").to_ip().unwrap(), std::net::IpAddr::V6("::1".parse().unwrap()));
+        assert_eq!(
+            t("uuid_v").to_uuid().unwrap(),
+            [0x12, 0x34, 0x56, 0x78, 0x12, 0x34, 0x56, 0x78, 0x12, 0x34, 0x56, 0x78, 0x12, 0x34, 0x56, 0x78]
+        );
+        assert_eq!(t("char_v").to_char().unwrap(), 'A');
+        assert_eq!(t("char_cp").to_char().unwrap(), '中');
+        assert_eq!(t("sz_v").to_size_bytes().unwrap(), 10 * 1024 * 1024);
+        assert_eq!(
+            t("dur_v").to_duration_seconds().unwrap(),
+            1.0 * 86400.0 + 2.0 * 3600.0 + 30.0 * 60.0 + 15.0
+        );
+        assert_eq!(t("ver_v").to_version_parts().unwrap(), vec![3, 10, 1]);
+
+        assert!(t("uuid_v").to_char().is_err());
+        assert!(Tagged { tag: "uuid".into(), value: "12345678-1234-5678-1234-5678123456".into() }
+            .to_uuid()
+            .is_err());
+        assert!(Tagged { tag: "c".into(), value: "ab".into() }.to_char().is_err());
+        assert!(Tagged { tag: "ip".into(), value: "127.0.0.1:80".into() }.to_ip().is_err());
+        assert!(Tagged { tag: "dt".into(), value: "2026-08-14T16:54:00".into() }
+            .to_datetime()
+            .is_err());
+    }
+
+    #[test]
+    fn invalid_glyphs_all_tags() {
+        let cases = [
+            "a: !i 1.5\n",
+            "a: !f 8080\n",
+            "a: !x XYZ\n",
+            "a: !xb F0A\n",
+            "a: !o 89\n",
+            "a: !b yes\n",
+            "a: !d 2026/08/14\n",
+            "a: !t 4pm\n",
+            "a: !dt 2026-08-14T16:54:00\n",
+            "a: !tz CST\n",
+            "a: !du 90 minutes\n",
+            "a: !sz 10m\n",
+            "a: !unix 01692000000\n",
+            "a: !ver 3.10.beta\n",
+            "a: !uuid 12345678-1234-5678-1234-5678123456\n",
+            "a: !ip 127.0.0.1:80\n",
+            "a: !b64 not_base64!!\n",
+            "a: !c ab\n",
+        ];
+        for src in cases {
+            assert!(decode(src).is_err(), "should reject: {src:?}");
+        }
     }
 }

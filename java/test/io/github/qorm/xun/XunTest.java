@@ -25,6 +25,8 @@ public final class XunTest {
     testCompactChars();
     testStringCompact();
     testEncodeAndRoundTrip();
+    testEncodeStripsSurroundingQuotes();
+    testUnpackNewHelpers();
     testFileWriteAndRead();
     testSymmetricAndUnpack();
     testUnicodeAndChinese();
@@ -125,6 +127,46 @@ custom_v: !sql SELECT * FROM users
     eq(parts[0], 3, "version[0]");
     eq(parts[1], 10, "version[1]");
     eq(parts[2], 1, "version[2]");
+  }
+
+  static void testEncodeStripsSurroundingQuotes() {
+    Map<String, Object> data = new LinkedHashMap<>();
+    data.put("a", "\"hello\"");
+    data.put("b", "\"\"");
+    data.put("c", "\"!x\"");
+    data.put("items", List.of("\"p\"", "\"q\""));
+    data.put("keep", new Xun.Tagged("s", "\"keep\""));
+    eq(
+        Xun.encode(data),
+        "a: hello\nb:\nc: !s !x\nitems:\n  - p\n  - q\nkeep: !s \"keep\"\n",
+        "strip surrounding quotes");
+  }
+
+  static void testUnpackNewHelpers() throws Exception {
+    Xun.Tagged tz = new Xun.Tagged("tz", "Asia/Shanghai");
+    eq(tz.toZoneId(), java.time.ZoneId.of("Asia/Shanghai"), "toZoneId");
+    eq(new Xun.Tagged("tz", "+08:00").toZoneId(), java.time.ZoneId.of("+08:00"), "toZoneId offset");
+    eq(new Xun.Tagged("tz", "Z").toZoneId(), java.time.ZoneOffset.UTC, "toZoneId Z");
+
+    eq(new Xun.Tagged("c", "A").toChar(), 'A', "toChar plain");
+    eq(new Xun.Tagged("c", "U+4E2D").toChar(), '中', "toChar code point");
+    try {
+      new Xun.Tagged("c", "ab").toChar();
+      fail("toChar multi: expected error");
+    } catch (Xun.Error ignored) {
+    }
+
+    // Encode of native ZoneId / Duration / Character / int[] round-trips to tags.
+    Map<String, Object> data = new LinkedHashMap<>();
+    data.put("zone", java.time.ZoneId.of("Asia/Shanghai"));
+    data.put("dur", java.time.Duration.ofMinutes(90));
+    data.put("ch", 'Z');
+    data.put("ver", new int[] {3, 10, 1});
+    Map<String, Object> parsed = Xun.decode(Xun.encode(data));
+    eq(parsed.get("zone"), new Xun.Tagged("tz", "Asia/Shanghai"), "zone encode");
+    eq(parsed.get("dur"), new Xun.Tagged("du", "1h30m"), "duration encode");
+    eq(parsed.get("ch"), new Xun.Tagged("c", "Z"), "char encode");
+    eq(parsed.get("ver"), new Xun.Tagged("ver", "3.10.1"), "version parts encode");
   }
 
   static void testFileWriteAndRead() throws Exception {

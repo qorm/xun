@@ -74,6 +74,8 @@ int xun_encode_file(const xun_value *v, const char *path);
 int xun_parse_size_bytes(const char *sz_str, uint64_t *out_bytes);
 int xun_parse_duration_ms(const char *du_str, uint64_t *out_ms);
 int xun_parse_version_parts(const char *ver_str, int *out_parts, size_t max_parts, size_t *out_count);
+int xun_parse_uuid(const char *uuid_str, uint8_t out[16]);
+int xun_parse_ip(const char *ip_str, uint8_t out[16], int *out_is_v6);
 
 #ifdef __cplusplus
 }

@@ -804,6 +804,17 @@ static void buf_append_indent(str_buf *b, int depth) {
   for (int i = 0; i < depth; i++) buf_append_str(b, "  ");
 }
 
+/* Strip paired double quotes from both ends ("..." -> ...), repeatedly. */
+static const char *strip_surrounding_quotes(const char *s, size_t *out_len) {
+  size_t len = strlen(s);
+  while (len >= 2 && s[0] == '"' && s[len - 1] == '"') {
+    s++;
+    len -= 2;
+  }
+  *out_len = len;
+  return s;
+}
+
 static int validate_key_c(const char *key) {
   if (!key || !key[0]) return -1;
   if (strchr(key, '\n') || strchr(key, '\r') || strstr(key, ": ") || (key[0] && key[strlen(key) - 1] == ':')) {
@@ -844,7 +855,11 @@ static int encode_dict_body(const xun_value *dict, int depth, str_buf *b) {
         if (encode_value_node(val, depth + 1, b) != 0) return -1;
       }
     } else if (val->kind == XUN_STRING) {
-      const char *s = val->u.str;
+      size_t slen = 0;
+      const char *raw = strip_surrounding_quotes(val->u.str, &slen);
+      char *s = malloc(slen + 1);
+      memcpy(s, raw, slen);
+      s[slen] = 0;
       if (strchr(s, '\n') || strchr(s, '\r')) {
         buf_append_str(b, " |\n");
         const char *cur = s;
@@ -877,6 +892,7 @@ static int encode_dict_body(const xun_value *dict, int depth, str_buf *b) {
           buf_append_str(b, "\n");
         }
       }
+      free(s);
     } else if (val->kind == XUN_INT) {
       char numbuf[64];
       snprintf(numbuf, sizeof numbuf, " !i %lld\n", (long long)val->u.i);
@@ -964,7 +980,11 @@ static int encode_value_node(const xun_value *v, int depth, str_buf *b) {
           if (encode_value_node(item, depth + 1, b) != 0) return -1;
         }
       } else if (item->kind == XUN_STRING) {
-        const char *s = item->u.str;
+        size_t slen = 0;
+        const char *raw = strip_surrounding_quotes(item->u.str, &slen);
+        char *s = malloc(slen + 1);
+        memcpy(s, raw, slen);
+        s[slen] = 0;
         if (strchr(s, '\n') || strchr(s, '\r')) {
           buf_append_str(b, " |\n");
           const char *cur = s;
@@ -997,6 +1017,7 @@ static int encode_value_node(const xun_value *v, int depth, str_buf *b) {
             buf_append_str(b, "\n");
           }
         }
+        free(s);
       } else if (item->kind == XUN_INT) {
         char numbuf[64];
         snprintf(numbuf, sizeof numbuf, " !i %lld\n", (long long)item->u.i);
@@ -1171,5 +1192,104 @@ int xun_parse_version_parts(const char *s, int *out_parts, size_t max_parts, siz
     else return -1;
   }
   *out_count = count;
+  return 0;
+}
+
+static int hexval(char c) {
+  if (c >= '0' && c <= '9') return c - '0';
+  if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+  if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+  return -1;
+}
+
+int xun_parse_uuid(const char *s, uint8_t out[16]) {
+  if (!s || !out) return -1;
+  if (strlen(s) != 36) return -1;
+  if (s[8] != '-' || s[13] != '-' || s[18] != '-' || s[23] != '-') return -1;
+  int oi = 0;
+  for (int i = 0; i < 36; i++) {
+    if (s[i] == '-') continue;
+    int hi = hexval(s[i]);
+    int lo = hexval(s[i + 1]);
+    if (hi < 0 || lo < 0) return -1;
+    out[oi++] = (uint8_t)((hi << 4) | lo);
+    i++;
+  }
+  return oi == 16 ? 0 : -1;
+}
+
+int xun_parse_ip(const char *s, uint8_t out[16], int *out_is_v6) {
+  if (!s || !out) return -1;
+  if (strchr(s, ':') == NULL) {
+    int a, b, c, d;
+    char buf[32];
+    if (!fullmatch("^[0-9]{1,3}(\\.[0-9]{1,3}){3}$", s)) return -1;
+    if (sscanf(s, "%d.%d.%d.%d", &a, &b, &c, &d) != 4) return -1;
+    if (a > 255 || b > 255 || c > 255 || d > 255) return -1;
+    snprintf(buf, sizeof buf, "%d.%d.%d.%d", a, b, c, d);
+    if (strcmp(buf, s) != 0) return -1;
+    out[0] = (uint8_t)a;
+    out[1] = (uint8_t)b;
+    out[2] = (uint8_t)c;
+    out[3] = (uint8_t)d;
+    if (out_is_v6) *out_is_v6 = 0;
+    return 0;
+  }
+  if (strchr(s, '.')) return -1;
+  int hextets[8];
+  int hn = 0;
+  int dcol_pos = -1;
+  const char *p = s;
+  while (*p) {
+    if (p[0] == ':' && p[1] == ':') {
+      if (dcol_pos >= 0) return -1;
+      dcol_pos = hn;
+      p += 2;
+      if (!*p) break;
+      continue;
+    }
+    const char *start = p;
+    while (*p && *p != ':') p++;
+    size_t len = (size_t)(p - start);
+    if (len == 0 || len > 4 || hn >= 8) return -1;
+    int val = 0;
+    for (size_t i = 0; i < len; i++) {
+      int hv = hexval(start[i]);
+      if (hv < 0) return -1;
+      val = (val << 4) | hv;
+    }
+    hextets[hn++] = val;
+    if (*p == ':') {
+      if (p[1] == ':') continue; /* "::" handled at loop top */
+      p++;
+    }
+  }
+  if (dcol_pos < 0) {
+    if (hn != 8) return -1;
+    for (int i = 0; i < 8; i++) {
+      out[2 * i] = (uint8_t)(hextets[i] >> 8);
+      out[2 * i + 1] = (uint8_t)(hextets[i] & 0xff);
+    }
+  } else {
+    if (hn >= 8) return -1;
+    int zeros = 8 - hn;
+    int idx = 0;
+    for (int i = 0; i < dcol_pos; i++) {
+      out[2 * idx] = (uint8_t)(hextets[i] >> 8);
+      out[2 * idx + 1] = (uint8_t)(hextets[i] & 0xff);
+      idx++;
+    }
+    for (int i = 0; i < zeros; i++) {
+      out[2 * idx] = 0;
+      out[2 * idx + 1] = 0;
+      idx++;
+    }
+    for (int i = dcol_pos; i < hn; i++) {
+      out[2 * idx] = (uint8_t)(hextets[i] >> 8);
+      out[2 * idx + 1] = (uint8_t)(hextets[i] & 0xff);
+      idx++;
+    }
+  }
+  if (out_is_v6) *out_is_v6 = 1;
   return 0;
 }

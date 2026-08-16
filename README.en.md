@@ -345,7 +345,7 @@ Follow these rules to ensure 100% compliant XUN generation:
 ### Golden Rules Checklist
 1. **Strict 2-Space Indent**: Never use tabs; indent exactly 2 spaces per level.
 2. **Colon Followed by Space**: Write `key: value`, never `key:value`.
-3. **No Quotes by Default**: Do not wrap strings in `"` or `'`. Writing `name: "Alice"` will keep the quotes as part of the string value.
+3. **No Quotes by Default**: Do not wrap strings in `"` or `'`. Writing `name: "Alice"` will keep the quotes as part of the string value. (When *encoding*, the encoders in all 6 languages automatically strip a paired set of surrounding double quotes, so JSON-style `"Alice"` is emitted as plain `Alice`.)
 4. **Explicit Type Tags**: Use `!n 8080` / `!i 8080` for numbers, `!b true` for booleans; otherwise they remain strings.
 5. **Always Close Multiline Blocks**: Every multiline block starting with `|` must end with `|` at the matching indentation level.
 6. **Explicit Empty Containers**: Write `{}` for empty dictionaries, `[]` for empty lists.
@@ -356,7 +356,7 @@ Follow these rules to ensure 100% compliant XUN generation:
 | Scenario | ❌ Incorrect | ✅ Correct | Reason |
 | :--- | :--- | :--- | :--- |
 | **Colon space** | `port:8080` | `port: !n 8080` | Space required after `:` |
-| **String quotes** | `name: "Alice"` | `name: Alice` | Quotes are preserved as literal characters |
+| **String quotes** | `name: "Alice"` | `name: Alice` | Quotes are preserved as literal characters; encoders strip surrounding `"…"` pairs automatically |
 | **Numeric value** | `count: 10` (wants integer) | `count: !i 10` or `!n 10` | Untagged scalar is parsed as string `"10"` |
 | **Boolean value** | `enabled: true` (wants bool) | `enabled: !b true` | Untagged `true` is parsed as string `"true"` |
 | **Float value** | `rate: !f 100` | `rate: !f 100.0` | `!f` requires a dot `.` or exponent `e` |
@@ -372,12 +372,14 @@ Standard implementations are provided for 6 major languages, fully adhering to *
 
 | Language | Package / Path | Decode / Unmarshal | Encode / Marshal | Highlights | Installation / Usage |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| **JavaScript** | [`@qorm/xun`](javascript/) | `decode(str)` / `parse(str)` | `encode(obj)` / `stringify(obj)` | Auto `Date` recognition, `unpack` helpers | `npm install @qorm/xun` |
-| **Python** | [`xun-format`](python/) | `decode(str)` / `load(fp)` / `loads(str)` | `encode(dict)` / `dump(dict, fp)` / `dumps(dict)` | Auto `datetime`/`UUID`/`ip`, recursive `unpack` | `pip install git+https://github.com/qorm/xun.git#subdirectory=python` |
-| **Go** | [`github.com/qorm/xun/go`](go/) | `xun.Decode(str)` / `xun.Unmarshal(b, &v)` | `xun.Encode(v)` / `xun.Marshal(v)` | Supports `time.Time`, `net.IP`, Tagged helpers | `go get github.com/qorm/xun/go` |
-| **Rust** | [`xun`](rust/) | `xun::decode(&str)` / `xun::from_str(&str)` | `xun::encode(&val)` / `xun::to_string(&val)` | Strongly-typed `Value` & `Tagged` extractors | `xun = { git = "https://github.com/qorm/xun", subdirectory = "rust" }` |
-| **Java** | [`io.github.qorm.xun`](java/) | `Xun.decode(str)` / `Xun.load(path)` | `Xun.encode(map)` / `Xun.dump(map, path)` | Auto `Instant`/`UUID`/`InetAddress` mapping | Add `java/src` to source path |
-| **C** | [`c/`](c/) | `xun_decode` / `xun_decode_file` | `xun_encode` / `xun_encode_file` | Arena memory pooling, size/duration/version parsers | Compile `xun.h` / `xun.c` |
+| **JavaScript** | [`@qorm/xun`](javascript/) | `decode(str)` / `parse(str)` | `encode(obj)` / `stringify(obj)` | Auto `Date` recognition, `unpack` helpers, `toUUID`/`toIP`/`toChar` | `npm install @qorm/xun` |
+| **Python** | [`xun-format`](python/) | `decode(str)` / `load(fp)` / `loads(str)` | `encode(dict)` / `dump(dict, fp)` / `dumps(dict)` | Auto `datetime`/`UUID`/`ip`, recursive `unpack`, `to_timezone`/`to_char` | `pip install git+https://github.com/qorm/xun.git#subdirectory=python` |
+| **Go** | [`github.com/qorm/xun/go`](go/) | `xun.Decode(str)` / `xun.Unmarshal(b, &v)` | `xun.Encode(v)` / `xun.Marshal(v)` | Supports `time.Time`, `net.IP`, Tagged helpers (`AsTime`/`AsUUID`/`AsChar`/…) | `go get github.com/qorm/xun/go` |
+| **Rust** | [`xun`](rust/) | `xun::decode(&str)` / `xun::from_str(&str)` | `xun::encode(&val)` / `xun::to_string(&val)` | Strongly-typed `Value` & `Tagged` extractors (`to_datetime`/`to_ip`/`to_uuid`/`to_char`) | `xun = { git = "https://github.com/qorm/xun", subdirectory = "rust" }` |
+| **Java** | [`io.github.qorm.xun`](java/) | `Xun.decode(str)` / `Xun.load(path)` | `Xun.encode(map)` / `Xun.dump(map, path)` | Auto `Instant`/`UUID`/`InetAddress` mapping, `toZoneId`/`toChar` | Add `java/src` to source path |
+| **C** | [`c/`](c/) | `xun_decode` / `xun_decode_file` | `xun_encode` / `xun_encode_file` | Arena memory pooling, size/duration/version/uuid/ip parsers | Compile `xun.h` / `xun.c` |
+
+Every language supports **all 20 core tags** end-to-end: strict glyph validation on decode, faithful round-trip on encode, and native unpack helpers for every format the host language can represent (`n`/`i`/`f`/`x`/`o`/`unix`/`b` decode to native numbers/booleans, `xb`/`b64` to native byte buffers, and `d`/`t`/`dt`/`tz`/`du`/`sz`/`ver`/`uuid`/`ip`/`c` to the per-language helper methods listed above).
 
 ### Code Examples
 

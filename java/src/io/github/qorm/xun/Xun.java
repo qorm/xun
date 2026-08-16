@@ -83,6 +83,29 @@ public final class Xun {
       return parseVersion(value);
     }
 
+    public java.time.ZoneId toZoneId() {
+      if (!tag.equals("tz")) throw new Error("cannot convert !" + tag + " to ZoneId");
+      if (value.equals("Z")) return java.time.ZoneOffset.UTC;
+      try {
+        return java.time.ZoneId.of(value);
+      } catch (RuntimeException e) {
+        throw new Error("unknown timezone: " + value);
+      }
+    }
+
+    public char toChar() {
+      if (!tag.equals("c")) throw new Error("cannot convert !" + tag + " to char");
+      if (value.startsWith("U+")) {
+        int cp = Integer.parseInt(value.substring(2), 16);
+        if (cp < 0 || cp > 0x10FFFF) throw new Error("invalid code point: " + value);
+        return Character.toChars(cp)[0];
+      }
+      if (value.codePointCount(0, value.length()) != 1) {
+        throw new Error("value '" + value + "' is not a single character");
+      }
+      return value.charAt(0);
+    }
+
     @Override
     public boolean equals(Object o) {
       if (this == o) return true;
@@ -465,6 +488,38 @@ public final class Xun {
     return sb.toString();
   }
 
+  /** Strip paired double quotes from both ends, repeatedly. */
+  private static String stripSurroundingQuotes(String s) {
+    while (s.length() >= 2 && s.startsWith("\"") && s.endsWith("\"")) {
+      s = s.substring(1, s.length() - 1);
+    }
+    return s;
+  }
+
+  /** Convert a java.time.Duration into a XUN !du glyph (e.g. 1h30m15s). */
+  private static String durationToGlyph(java.time.Duration d) {
+    long totalMs = d.toMillis();
+    StringBuilder sb = new StringBuilder();
+    long days = totalMs / 86400000L;
+    totalMs %= 86400000L;
+    long hours = totalMs / 3600000L;
+    totalMs %= 3600000L;
+    long minutes = totalMs / 60000L;
+    totalMs %= 60000L;
+    double seconds = totalMs / 1000.0;
+    if (days > 0) sb.append(days).append('d');
+    if (hours > 0) sb.append(hours).append('h');
+    if (minutes > 0) sb.append(minutes).append('m');
+    if (seconds > 0 || sb.length() == 0) {
+      if (seconds == Math.floor(seconds) && !Double.isInfinite(seconds)) {
+        sb.append((long) seconds).append('s');
+      } else {
+        sb.append(seconds).append('s');
+      }
+    }
+    return sb.toString();
+  }
+
   private static Object applyTag(String tag, String glyph, int n) {
     switch (tag) {
       case "s":
@@ -664,7 +719,7 @@ public final class Xun {
           encodeList(sub, depth + 1, lines);
         }
       } else if (v instanceof String) {
-        String s = (String) v;
+        String s = stripSurroundingQuotes((String) v);
         if (s.contains("\n") || s.contains("\r")) {
           lines.add(indent + key + ": |");
           for (String line : s.split("\\R")) {
@@ -696,6 +751,19 @@ public final class Xun {
         lines.add(indent + key + ": !d " + v);
       } else if (v instanceof java.time.LocalTime) {
         lines.add(indent + key + ": !t " + v);
+      } else if (v instanceof java.time.ZoneId) {
+        lines.add(indent + key + ": !tz " + v);
+      } else if (v instanceof java.time.Duration) {
+        lines.add(indent + key + ": !du " + durationToGlyph((java.time.Duration) v));
+      } else if (v instanceof Character) {
+        lines.add(indent + key + ": !c " + v);
+      } else if (v instanceof int[]) {
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < ((int[]) v).length; i++) {
+          if (i > 0) sb.append('.');
+          sb.append(((int[]) v)[i]);
+        }
+        lines.add(indent + key + ": !ver " + sb);
       } else if (v instanceof java.util.UUID) {
         lines.add(indent + key + ": !uuid " + v);
       } else if (v instanceof java.net.InetAddress) {
@@ -742,7 +810,7 @@ public final class Xun {
           encodeList(sub, depth + 1, lines);
         }
       } else if (v instanceof String) {
-        String s = (String) v;
+        String s = stripSurroundingQuotes((String) v);
         if (s.contains("\n") || s.contains("\r")) {
           lines.add(indent + "- |");
           for (String line : s.split("\\R")) {
@@ -774,6 +842,19 @@ public final class Xun {
         lines.add(indent + "- !d " + v);
       } else if (v instanceof java.time.LocalTime) {
         lines.add(indent + "- !t " + v);
+      } else if (v instanceof java.time.ZoneId) {
+        lines.add(indent + "- !tz " + v);
+      } else if (v instanceof java.time.Duration) {
+        lines.add(indent + "- !du " + durationToGlyph((java.time.Duration) v));
+      } else if (v instanceof Character) {
+        lines.add(indent + "- !c " + v);
+      } else if (v instanceof int[]) {
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < ((int[]) v).length; i++) {
+          if (i > 0) sb.append('.');
+          sb.append(((int[]) v)[i]);
+        }
+        lines.add(indent + "- !ver " + sb);
       } else if (v instanceof java.util.UUID) {
         lines.add(indent + "- !uuid " + v);
       } else if (v instanceof java.net.InetAddress) {

@@ -160,6 +160,146 @@ empty_block: |
         with self.assertRaises(XunError):
             decode("a: |\n  Line 1\n  Line 2\n")
 
+    def test_unpack_all_formats(self):
+        raw = """
+str_plain: hello world
+num_int: !i 42
+num_float: !f 3.14
+num_hex: !x DEAD_BEEF
+num_oct: !o 755
+flag: !b true
+date_v: !d 2026-08-14
+time_v: !t 16:54:00.123
+dt_v: !dt 2026-08-14T16:54:00+08:00
+tz_v: !tz Asia/Shanghai
+dur_v: !du 1d2h30m15s
+sz_v: !sz 10MiB
+unix_v: !unix 1700000000
+ver_v: !ver 3.10.1
+uuid_v: !uuid 12345678-1234-5678-1234-567812345678
+ip_v: !ip ::1
+bytes_v: !xb FF00AA
+b64_v: !b64 SGVsbG8=
+char_v: !c A
+char_cp: !c U+4E2D
+custom_v: !sql SELECT 1
+"""
+        import datetime
+        import ipaddress
+        import uuid
+
+        native = unpack(decode(raw))
+        self.assertEqual(native["str_plain"], "hello world")
+        self.assertEqual(native["num_int"], 42)
+        self.assertEqual(native["num_float"], 3.14)
+        self.assertEqual(native["num_hex"], 0xDEADBEEF)
+        self.assertEqual(native["num_oct"], 0o755)
+        self.assertIs(native["flag"], True)
+        self.assertEqual(native["date_v"], datetime.date(2026, 8, 14))
+        self.assertEqual(native["time_v"], datetime.time(16, 54, 0, 123000))
+        self.assertEqual(
+            native["dt_v"],
+            datetime.datetime(2026, 8, 14, 16, 54, tzinfo=datetime.timezone(datetime.timedelta(hours=8))),
+        )
+        self.assertEqual(native["tz_v"].key, "Asia/Shanghai")
+        self.assertEqual(native["dur_v"], 1 * 86400 + 2 * 3600 + 30 * 60 + 15)
+        self.assertEqual(native["sz_v"], 10 * 1024 * 1024)
+        self.assertEqual(native["unix_v"], 1700000000)
+        self.assertEqual(native["ver_v"], (3, 10, 1))
+        self.assertEqual(native["uuid_v"], uuid.UUID("12345678-1234-5678-1234-567812345678"))
+        self.assertEqual(native["ip_v"], ipaddress.ip_address("::1"))
+        self.assertEqual(native["bytes_v"], bytes([0xFF, 0x00, 0xAA]))
+        self.assertEqual(native["b64_v"], b"Hello")
+        self.assertEqual(native["char_v"], "A")
+        self.assertEqual(native["char_cp"], "中")
+        self.assertEqual(native["custom_v"], "SELECT 1")
+
+        # Round-trip: encoding the unpacked natives back preserves values.
+        text = encode(native)
+        reparsed = decode(text)
+        self.assertEqual(reparsed["dt_v"], Tagged("dt", "2026-08-14T16:54:00+08:00"))
+        self.assertEqual(reparsed["ip_v"], Tagged("ip", "::1"))
+        self.assertEqual(reparsed["uuid_v"], Tagged("uuid", "12345678-1234-5678-1234-567812345678"))
+        self.assertEqual(reparsed["sz_v"], 10 * 1024 * 1024)
+        self.assertEqual(reparsed["dur_v"], 1 * 86400 + 2 * 3600 + 30 * 60 + 15)
+        self.assertEqual(reparsed["ver_v"], Tagged("ver", "3.10.1"))
+        self.assertEqual(reparsed["tz_v"], Tagged("tz", "Asia/Shanghai"))
+        self.assertEqual(reparsed["char_cp"], "中")
+
+    def test_to_timezone_and_to_char(self):
+        import datetime
+        from zoneinfo import ZoneInfo
+
+        self.assertEqual(Tagged("tz", "Z").to_timezone(), datetime.timezone.utc)
+        self.assertEqual(Tagged("tz", "UTC").to_timezone(), datetime.timezone.utc)
+        self.assertEqual(
+            Tagged("tz", "+08:00").to_timezone(),
+            datetime.timezone(datetime.timedelta(hours=8)),
+        )
+        self.assertEqual(Tagged("tz", "Asia/Shanghai").to_timezone().key, ZoneInfo("Asia/Shanghai").key)
+        with self.assertRaises(XunError):
+            Tagged("tz", "Not/AZone").to_timezone()
+
+        self.assertEqual(Tagged("c", "A").to_char(), "A")
+        self.assertEqual(Tagged("c", "U+4E2D").to_char(), "中")
+        with self.assertRaises(XunError):
+            Tagged("c", "ab").to_char()
+
+    def test_invalid_glyphs_all_tags(self):
+        invalid = [
+            "a: !i 1.5\n",
+            "a: !i 99999999999999999999999999\n",
+            "a: !f 8080\n",
+            "a: !x XYZ\n",
+            "a: !xb F0A\n",
+            "a: !o 89\n",
+            "a: !b yes\n",
+            "a: !d 2026/08/14\n",
+            "a: !t 4pm\n",
+            "a: !dt 2026-08-14T16:54:00\n",
+            "a: !tz CST\n",
+            "a: !du 90 minutes\n",
+            "a: !sz 10m\n",
+            "a: !unix 01692000000\n",
+            "a: !ver 3.10.beta\n",
+            "a: !uuid 12345678-1234-5678-1234-5678123456\n",
+            "a: !ip 127.0.0.1:80\n",
+            "a: !b64 not_base64!!\n",
+            "a: !c ab\n",
+        ]
+        for src in invalid:
+            with self.assertRaises(XunError, msg=f"should reject: {src!r}"):
+                decode(src)
+
+    def test_encode_roundtrip_all_20_tags(self):
+        raw = """
+str_plain: hello world
+num_int: !i 42
+num_float: !f 3.14159
+num_hex: !x DEAD_BEEF
+num_oct: !o 755
+flag: !b true
+date_v: !d 2026-08-14
+time_v: !t 16:54:00.123
+dt_v: !dt 2026-08-14T16:54:00+08:00
+tz_v: !tz Asia/Shanghai
+dur_v: !du 1d2h30m15s
+sz_v: !sz 10GiB
+unix_v: !unix 1700000000
+ver_v: !ver 3.10.1
+uuid_v: !uuid 12345678-1234-5678-1234-567812345678
+ip4_v: !ip 127.0.0.1
+ip6_v: !ip ::1
+bytes_v: !xb FF00AA
+b64_v: !b64 SGVsbG8=
+char_v: !c A
+char_cp: !c U+4E2D
+"""
+        doc = decode(raw)
+        text = encode(doc)
+        reparsed = decode(text)
+        self.assertEqual(reparsed, doc)
+
     def test_deep_nesting(self):
         nested_obj: dict = {"value": "deepest"}
         for i in range(20):

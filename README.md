@@ -345,7 +345,7 @@ query: !sql |
 ### 黄金规则清单
 1. **严格 2 格空格缩进**：禁止使用 Tab，每级深度正好 2 个空格。
 2. **冒号后必须有空格**：字典键值对写 `key: value`，绝对不要写成 `key:value`。
-3. **默认不加引号**：不要给字符串加 `"` 或 `'`。如果你写了 `name: "Alice"`，双引号会变成字符串内容的一部分。
+3. **默认不加引号**：不要给字符串加 `"` 或 `'`。如果你写了 `name: "Alice"`，双引号会变成字符串内容的一部分。（**编码时**，6 种语言的编码器会自动去掉字符串左右成对的双引号，JSON 风格的 `"Alice"` 会被输出为 `Alice`。）
 4. **显式类型 Tag**：数字如果要当数字，请写 `!n 8080` 或 `!i 8080`；布尔值请写 `!b true`；否则它们都是字符串。
 5. **多行块必须闭合**：以 `|` 开始的多行文本块，必须在同级缩进以 `|` 显式闭合。
 6. **空容器显式书写**：空字典写 `{}`，空列表写 `[]`。
@@ -356,7 +356,7 @@ query: !sql |
 | 场景 | ❌ 错误写法 | ✅ 正确写法 | 为什么 |
 | :--- | :--- | :--- | :--- |
 | **冒号空格** | `port:8080` | `port: !n 8080` | XUN 规定冒号后必须有空格 |
-| **字符串引号** | `name: "Alice"` | `name: Alice` | XUN 默认不加引号，加了会保留引号字符 |
+| **字符串引号** | `name: "Alice"` | `name: Alice` | XUN 默认不加引号，加了会保留引号字符；编码时会自动剥掉左右成对的双引号 |
 | **数字类型** | `count: 10` （期望整数） | `count: !i 10` 或 `!n 10` | 未标注 tag 的标量一律解析为字符串 `"10"` |
 | **布尔类型** | `enabled: true` （期望布尔） | `enabled: !b true` | 未标注 tag 的 `true` 解析为字符串 `"true"` |
 | **浮点数** | `rate: !f 100` | `rate: !f 100.0` | `!f` 必须包含小数点 `.` 或指数 `e` |
@@ -372,12 +372,14 @@ XUN 提供了 6 种主流语言的标准实现，全面遵循**对称 API 设计
 
 | 语言 | 模块/包路径 | 解码 (Decode / Unmarshal) | 编码 (Encode / Marshal) | 特色能力 | 安装/使用方式 |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| **JavaScript** | [`@qorm/xun`](javascript/) | `decode(str)` / `parse(str)` | `encode(obj)` / `stringify(obj)` | 自动识别 `Date`、`unpack` 辅助解包 | `npm install @qorm/xun` |
-| **Python** | [`xun-format`](python/) | `decode(str)` / `load(fp)` / `loads(str)` | `encode(dict)` / `dump(dict, fp)` / `dumps(dict)` | 原生识别 `datetime`/`UUID`/`ip`，`unpack` 递归解包 | `pip install git+https://github.com/qorm/xun.git#subdirectory=python` |
-| **Go** | [`github.com/qorm/xun/go`](go/) | `xun.Decode(str)` / `xun.Unmarshal(b, &v)` | `xun.Encode(v)` / `xun.Marshal(v)` | 支持 `time.Time`、`net.IP`、Tagged 快捷转换方法 | `go get github.com/qorm/xun/go` |
-| **Rust** | [`xun`](rust/) | `xun::decode(&str)` / `xun::from_str(&str)` | `xun::encode(&val)` / `xun::to_string(&val)` | 强类型 `Value` 与 `Tagged` 解包方法 | `xun = { git = "https://github.com/qorm/xun", subdirectory = "rust" }` |
-| **Java** | [`io.github.qorm.xun`](java/) | `Xun.decode(str)` / `Xun.load(path)` | `Xun.encode(map)` / `Xun.dump(map, path)` | 识别 `Instant`/`UUID`/`InetAddress` 等 | 引入 `java/src` 源码路径 |
-| **C** | [`c/`](c/) | `xun_decode` / `xun_decode_file` | `xun_encode` / `xun_encode_file` | 内存池零碎碎片、内置容量/时长/版本解析器 | 编译 `xun.h` / `xun.c` |
+| **JavaScript** | [`@qorm/xun`](javascript/) | `decode(str)` / `parse(str)` | `encode(obj)` / `stringify(obj)` | 自动识别 `Date`、`unpack` 辅助解包、`toUUID`/`toIP`/`toChar` | `npm install @qorm/xun` |
+| **Python** | [`xun-format`](python/) | `decode(str)` / `load(fp)` / `loads(str)` | `encode(dict)` / `dump(dict, fp)` / `dumps(dict)` | 原生识别 `datetime`/`UUID`/`ip`，`unpack` 递归解包，`to_timezone`/`to_char` | `pip install git+https://github.com/qorm/xun.git#subdirectory=python` |
+| **Go** | [`github.com/qorm/xun/go`](go/) | `xun.Decode(str)` / `xun.Unmarshal(b, &v)` | `xun.Encode(v)` / `xun.Marshal(v)` | 支持 `time.Time`、`net.IP`、Tagged 快捷转换方法（`AsTime`/`AsUUID`/`AsChar` 等） | `go get github.com/qorm/xun/go` |
+| **Rust** | [`xun`](rust/) | `xun::decode(&str)` / `xun::from_str(&str)` | `xun::encode(&val)` / `xun::to_string(&val)` | 强类型 `Value` 与 `Tagged` 解包方法（`to_datetime`/`to_ip`/`to_uuid`/`to_char`） | `xun = { git = "https://github.com/qorm/xun", subdirectory = "rust" }` |
+| **Java** | [`io.github.qorm.xun`](java/) | `Xun.decode(str)` / `Xun.load(path)` | `Xun.encode(map)` / `Xun.dump(map, path)` | 识别 `Instant`/`UUID`/`InetAddress` 等，`toZoneId`/`toChar` | 引入 `java/src` 源码路径 |
+| **C** | [`c/`](c/) | `xun_decode` / `xun_decode_file` | `xun_encode` / `xun_encode_file` | 内存池零碎碎片、内置容量/时长/版本/UUID/IP 解析器 | 编译 `xun.h` / `xun.c` |
+
+每一类语言都**完整支持全部 20 种核心 Tag**：解码时严格校验字形、编码时完整往返、并且对宿主机语言可原生表示的每一类格式提供解包辅助方法（`n`/`i`/`f`/`x`/`o`/`unix`/`b` 直接解为原生数字/布尔，`xb`/`b64` 解为原生字节缓冲，`d`/`t`/`dt`/`tz`/`du`/`sz`/`ver`/`uuid`/`ip`/`c` 对应上表所列的各语言辅助方法）。
 
 ### 代码使用示例
 

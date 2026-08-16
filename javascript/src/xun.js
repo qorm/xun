@@ -67,6 +67,42 @@ export class Tagged {
     }
     return parseVersion(this.value);
   }
+
+  toUUID() {
+    if (this.tag !== "uuid") {
+      throw new XunError(`cannot convert !${this.tag} to UUID`);
+    }
+    if (!/^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(this.value)) {
+      throw new XunError(`invalid UUID: ${this.value}`);
+    }
+    return this.value.toLowerCase();
+  }
+
+  toIP() {
+    if (this.tag !== "ip") {
+      throw new XunError(`cannot convert !${this.tag} to IP address`);
+    }
+    if (!isIPv4(this.value) && !isIPv6(this.value)) {
+      throw new XunError(`invalid IP address: ${this.value}`);
+    }
+    return this.value;
+  }
+
+  toChar() {
+    if (this.tag !== "c") {
+      throw new XunError(`cannot convert !${this.tag} to char`);
+    }
+    const m = this.value.match(/^U\+([0-9A-Fa-f]{4,6})$/);
+    if (m) {
+      const cp = parseInt(m[1], 16);
+      if (cp > 0x10ffff) throw new XunError("invalid code point");
+      return String.fromCodePoint(cp);
+    }
+    if ([...this.value].length !== 1) {
+      throw new XunError(`value '${this.value}' is not a single character`);
+    }
+    return this.value;
+  }
 }
 
 export function parseSize(s) {
@@ -108,11 +144,14 @@ export function parseVersion(s) {
 
 export function unpack(v) {
   if (v instanceof Tagged) {
-    if (v.tag === "dt") return v.toDate();
+    if (v.tag === "dt" || v.tag === "d") return v.toDate();
     if (v.tag === "ver") return v.toVersionParts();
     if (v.tag === "sz") return v.toBytesSize();
     if (v.tag === "du") return v.toDurationSeconds();
     if (v.tag === "xb" || v.tag === "b64") return v.toBytes();
+    if (v.tag === "ip") return v.toIP();
+    if (v.tag === "uuid") return v.toUUID();
+    if (v.tag === "c") return v.toChar();
     return v.value;
   }
   if (Array.isArray(v)) {
@@ -640,10 +679,19 @@ function encodeListItems(items, depth, out, seen, path) {
   }
 }
 
+function stripSurroundingQuotes(s) {
+  let out = s;
+  while (out.length >= 2 && out.startsWith('"') && out.endsWith('"')) {
+    out = out.slice(1, -1);
+  }
+  return out;
+}
+
 function encodeScalarField(indent, key, v, out, path) {
   if (v === null || v === undefined) {
     out.push(`${indent}${key}:`);
   } else if (typeof v === "string") {
+    v = stripSurroundingQuotes(v);
     if (v.includes("\n") || v.includes("\r")) {
       out.push(`${indent}${key}: |`);
       for (const line of v.split(/\r?\n/)) {
@@ -693,6 +741,7 @@ function encodeScalarListItem(indent, v, out, path) {
   if (v === null || v === undefined) {
     out.push(`${indent}-`);
   } else if (typeof v === "string") {
+    v = stripSurroundingQuotes(v);
     if (v.includes("\n") || v.includes("\r")) {
       out.push(`${indent}- |`);
       for (const line of v.split(/\r?\n/)) {

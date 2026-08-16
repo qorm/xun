@@ -121,6 +121,18 @@ test("encode nested objects and arrays", () => {
   assert.equal(parsed.banner, "Line1\nLine2\nLine3");
 });
 
+test("encode strips surrounding double-quote pairs", () => {
+  assert.equal(encode({ a: '"hello"' }), "a: hello\n");
+  assert.equal(encode({ a: '""hello world""' }), "a: hello world\n");
+  assert.equal(encode({ a: '""' }), "a:\n");
+  assert.equal(encode({ a: '"!x"' }), "a: !s !x\n");
+  assert.equal(encode({ a: '"' }), "a: \"\n");
+  assert.equal(encode({ a: '"unclosed' }), "a: \"unclosed\n");
+  assert.equal(encode({ items: ['"a"', '"b"'] }), "items:\n  - a\n  - b\n");
+  // Tagged values are never stripped.
+  assert.equal(encode({ a: new Tagged("s", '"keep"') }), "a: !s \"keep\"\n");
+});
+
 test("file write and read round-trip", () => {
   const data = {
     app: "xun-demo",
