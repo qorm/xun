@@ -316,6 +316,10 @@ class Parser {
       return this.parseEmptyOrNested(parentIndent, lineNo, sourceLine, depth, null);
     }
 
+    if (raw.startsWith('"')) {
+      return parseQuotedString(raw, lineNo, sourceLine);
+    }
+
     return raw;
   }
 
@@ -350,7 +354,7 @@ class Parser {
       if (tag === "s") return text;
       return applyTag(tag, text, lineNo, sourceLine);
     }
-    if (tag === "s") return body;
+    if (tag === "s") return parseStringBody(body, lineNo, sourceLine);
     return applyTag(tag, body, lineNo, sourceLine);
   }
 
@@ -687,6 +691,65 @@ function stripSurroundingQuotes(s) {
   return out;
 }
 
+// Glyphs that JavaScript Number() would coerce, plus syntactic specials.
+const LOOKS_LIKE_JS_NUMBER =
+  /^[ \t\n\r\f\v]*[+-]?(?:Infinity|0[xX][0-9a-fA-F]+|0[bB][01]+|0[oO][0-7]+|(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?)[ \t\n\r\f\v]*$/;
+
+function parseQuotedString(raw, lineNo, sourceLine = "") {
+  if (!raw.startsWith('"')) {
+    throw new XunError("quoted string must start with '\"'", lineNo, 1, sourceLine);
+  }
+  let out = "";
+  for (let i = 1; i < raw.length; i++) {
+    const ch = raw[i];
+    if (ch === "\\") {
+      if (i + 1 >= raw.length) {
+        throw new XunError("unclosed escape in quoted string", lineNo, 1, sourceLine);
+      }
+      const next = raw[++i];
+      if (next === "\\" || next === '"') out += next;
+      else throw new XunError(`invalid escape \\${next} in quoted string`, lineNo, 1, sourceLine);
+      continue;
+    }
+    if (ch === '"') {
+      if (i !== raw.length - 1) {
+        throw new XunError("unexpected trailing content after quoted string", lineNo, 1, sourceLine);
+      }
+      return out;
+    }
+    out += ch;
+  }
+  throw new XunError("unclosed quoted string", lineNo, 1, sourceLine);
+}
+
+function needsQuotedGlyph(s) {
+  return s !== s.trim() || s.includes('"') || s.includes("\\");
+}
+
+function quoteGlyph(s) {
+  let out = '"';
+  for (const ch of s) {
+    if (ch === "\\") out += "\\\\";
+    else if (ch === '"') out += '\\"';
+    else out += ch;
+  }
+  return out + '"';
+}
+
+function encodeStringGlyph(s) {
+  const body = needsQuotedGlyph(s) ? quoteGlyph(s) : s;
+  return needsStringTag(s) ? `!s ${body}` : body;
+}
+
+function needsStringTag(s) {
+  return s.startsWith("!") || s === "[]" || s === "{}" || s.startsWith("|") || LOOKS_LIKE_JS_NUMBER.test(s);
+}
+
+function parseStringBody(body, lineNo, sourceLine = "") {
+  if (body.startsWith('"')) return parseQuotedString(body, lineNo, sourceLine);
+  return body;
+}
+
 function encodeScalarField(indent, key, v, out, path) {
   if (v === null || v === undefined) {
     out.push(`${indent}${key}:`);
@@ -701,11 +764,7 @@ function encodeScalarField(indent, key, v, out, path) {
     } else if (v === "") {
       out.push(`${indent}${key}:`);
     } else {
-      if (v.startsWith("!") || v === "[]" || v === "{}" || v.startsWith("|")) {
-        out.push(`${indent}${key}: !s ${v}`);
-      } else {
-        out.push(`${indent}${key}: ${v}`);
-      }
+      out.push(`${indent}${key}: ${encodeStringGlyph(v)}`);
     }
   } else if (typeof v === "boolean") {
     out.push(`${indent}${key}: !b ${v ? "true" : "false"}`);
@@ -751,11 +810,7 @@ function encodeScalarListItem(indent, v, out, path) {
     } else if (v === "") {
       out.push(`${indent}-`);
     } else {
-      if (v.startsWith("!") || v === "[]" || v === "{}" || v.startsWith("|")) {
-        out.push(`${indent}- !s ${v}`);
-      } else {
-        out.push(`${indent}- ${v}`);
-      }
+      out.push(`${indent}- ${encodeStringGlyph(v)}`);
     }
   } else if (typeof v === "boolean") {
     out.push(`${indent}- !b ${v ? "true" : "false"}`);

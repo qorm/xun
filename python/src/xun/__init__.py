@@ -354,6 +354,8 @@ class Parser:
             return self.parse_tagged(raw, parent_indent, line_no, source_line, depth)
         if raw == "":
             return self.parse_empty_or_nested(parent_indent, line_no, source_line, depth, None)
+        if raw.startswith('"'):
+            return _parse_quoted_string(raw, line_no, source_line)
         return raw
 
     def parse_tagged(self, raw: str, parent_indent: int, line_no: int, source_line: str, depth: int) -> Any:
@@ -380,7 +382,7 @@ class Parser:
             text = self.read_multiline(parent_indent, ml[0], ml[1], line_no, source_line)
             return text if tag == "s" else apply_tag(tag, text, line_no, source_line)
         if tag == "s":
-            return body
+            return _parse_string_body(body, line_no, source_line)
         return apply_tag(tag, body, line_no, source_line)
 
     def parse_empty_or_nested(
@@ -715,6 +717,69 @@ def _strip_quotes(s: str) -> str:
     return s
 
 
+# Glyphs that JavaScript Number() would coerce, plus syntactic specials.
+_LOOKS_LIKE_JS_NUMBER = re.compile(
+    r"^[ \t\n\r\f\v]*[+-]?(?:Infinity|0[xX][0-9a-fA-F]+|0[bB][01]+|0[oO][0-7]+|(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?)[ \t\n\r\f\v]*$"
+)
+
+
+def _needs_string_tag(s: str) -> bool:
+    return s.startswith("!") or s in ("[]", "{}") or s.startswith("|") or _LOOKS_LIKE_JS_NUMBER.match(s) is not None
+
+
+def _parse_quoted_string(raw: str, line_no: int, source_line: str = "") -> str:
+    if not raw.startswith('"'):
+        raise XunError("quoted string must start with '\"'", line=line_no, source_line=source_line)
+    out: list[str] = []
+    i = 1
+    while i < len(raw):
+        ch = raw[i]
+        if ch == "\\":
+            if i + 1 >= len(raw):
+                raise XunError("unclosed escape in quoted string", line=line_no, source_line=source_line)
+            nxt = raw[i + 1]
+            if nxt in ('\\', '"'):
+                out.append(nxt)
+                i += 2
+                continue
+            raise XunError(f"invalid escape \\{nxt} in quoted string", line=line_no, source_line=source_line)
+        if ch == '"':
+            if i != len(raw) - 1:
+                raise XunError("unexpected trailing content after quoted string", line=line_no, source_line=source_line)
+            return "".join(out)
+        out.append(ch)
+        i += 1
+    raise XunError("unclosed quoted string", line=line_no, source_line=source_line)
+
+
+def _needs_quoted_glyph(s: str) -> bool:
+    return s != s.strip() or '"' in s or "\\" in s
+
+
+def _quote_glyph(s: str) -> str:
+    parts = ['"']
+    for ch in s:
+        if ch == "\\":
+            parts.append("\\\\")
+        elif ch == '"':
+            parts.append('\\"')
+        else:
+            parts.append(ch)
+    parts.append('"')
+    return "".join(parts)
+
+
+def _encode_string_glyph(s: str) -> str:
+    body = _quote_glyph(s) if _needs_quoted_glyph(s) else s
+    return f"!s {body}" if _needs_string_tag(s) else body
+
+
+def _parse_string_body(body: str, line_no: int, source_line: str = "") -> str:
+    if body.startswith('"'):
+        return _parse_quoted_string(body, line_no, source_line)
+    return body
+
+
 def _encode_scalar_field(indent: str, key: str, v: Any, out: list[str], path: str) -> None:
     if v is None:
         out.append(f"{indent}{key}:")
@@ -728,10 +793,7 @@ def _encode_scalar_field(indent: str, key: str, v: Any, out: list[str], path: st
         elif v == "":
             out.append(f"{indent}{key}:")
         else:
-            if v.startswith("!") or v in ("[]", "{}", "|") or v.startswith("|"):
-                out.append(f"{indent}{key}: !s {v}")
-            else:
-                out.append(f"{indent}{key}: {v}")
+            out.append(f"{indent}{key}: {_encode_string_glyph(v)}")
     elif isinstance(v, bool):
         out.append(f"{indent}{key}: !b {'true' if v else 'false'}")
     elif isinstance(v, int):
@@ -784,10 +846,7 @@ def _encode_scalar_list_item(indent: str, v: Any, out: list[str], path: str) -> 
         elif v == "":
             out.append(f"{indent}-")
         else:
-            if v.startswith("!") or v in ("[]", "{}", "|") or v.startswith("|"):
-                out.append(f"{indent}- !s {v}")
-            else:
-                out.append(f"{indent}- {v}")
+            out.append(f"{indent}- {_encode_string_glyph(v)}")
     elif isinstance(v, bool):
         out.append(f"{indent}- !b {'true' if v else 'false'}")
     elif isinstance(v, int):

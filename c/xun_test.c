@@ -367,6 +367,172 @@ static void test_encode_strips_surrounding_quotes(void) {
   xun_free(doc);
 }
 
+static void expect_encode(const char *src, const char *want, const char *label) {
+  xun_value *doc = NULL;
+  xun_error err;
+  if (xun_parse(src, &doc, &err) != 0) {
+    fail(label);
+    return;
+  }
+  char *encoded = NULL;
+  size_t len = 0;
+  if (xun_encode(doc, &encoded, &len) != 0) {
+    fail(label);
+    xun_free(doc);
+    return;
+  }
+  if (strcmp(encoded, want) != 0) {
+    fprintf(stderr, "%s got: %s\nwant: %s\n", label, encoded, want);
+    fail(label);
+  }
+  free(encoded);
+  xun_free(doc);
+}
+
+static void test_encode_numeric_looking_strings(void) {
+  expect_encode("a: 123\n", "a: !s 123\n", "str 123");
+  expect_encode("a: \"123 \"\n", "a: !s \"123 \"\n", "quoted trailing space");
+  {
+    xun_value *doc = NULL;
+    xun_error err;
+    if (xun_parse("a: \"\"\n", &doc, &err) != 0) fail("quoted empty parse");
+    else {
+      expect_str(xun_dict_get(doc, "a"), "", "quoted empty value");
+      xun_free(doc);
+    }
+  }
+  expect_encode("a: 3.10\n", "a: !s 3.10\n", "str 3.10");
+  expect_encode("a: -1.5\n", "a: !s -1.5\n", "str -1.5");
+  expect_encode("a: 1e-3\n", "a: !s 1e-3\n", "str 1e-3");
+  expect_encode("a: 0xFF\n", "a: !s 0xFF\n", "str 0xFF");
+  expect_encode("a: 0b10\n", "a: !s 0b10\n", "str 0b10");
+  expect_encode("a: 0o755\n", "a: !s 0o755\n", "str 0o755");
+  expect_encode("a: Infinity\n", "a: !s Infinity\n", "str Infinity");
+  expect_encode("items:\n  - 80\n  - 443\n", "items:\n  - !s 80\n  - !s 443\n", "list numeric strings");
+  expect_encode("a: !i 123\n", "a: !i 123\n", "int 123");
+  expect_encode("a: hello\n", "a: hello\n", "plain hello");
+  expect_encode("a: 123abc\n", "a: 123abc\n", "123abc");
+  expect_encode("a: 1.2.3\n", "a: 1.2.3\n", "version-like");
+}
+
+static char *nest_source(int levels) {
+  size_t cap = (size_t)levels * (size_t)levels + (size_t)levels * 64 + 128;
+  char *s = malloc(cap);
+  size_t used = 0;
+  for (int i = 0; i < levels; i++) {
+    for (int sp = 0; sp < i * 2; sp++) s[used++] = ' ';
+    used += (size_t)snprintf(s + used, cap - used, "k%d:\n", i);
+  }
+  for (int sp = 0; sp < levels * 2; sp++) s[used++] = ' ';
+  used += (size_t)snprintf(s + used, cap - used, "v: leaf\n");
+  s[used] = 0;
+  return s;
+}
+
+static void expect_string_roundtrip(const char *s, const char *label) {
+  char src[128];
+  snprintf(src, sizeof src, "a: %s\n", s);
+  xun_value *doc = NULL;
+  xun_error err;
+  if (xun_parse(src, &doc, &err) != 0) {
+    fail(label);
+    return;
+  }
+  const xun_value *val = xun_dict_get(doc, "a");
+  if (!val || val->kind != XUN_STRING || strcmp(val->u.str, s) != 0) {
+    fail(label);
+    xun_free(doc);
+    return;
+  }
+  char *encoded = NULL;
+  size_t len = 0;
+  if (xun_encode(doc, &encoded, &len) != 0) {
+    fail(label);
+    xun_free(doc);
+    return;
+  }
+  xun_value *reparsed = NULL;
+  if (xun_parse(encoded, &reparsed, &err) != 0) {
+    fail(label);
+    free(encoded);
+    xun_free(doc);
+    return;
+  }
+  expect_str(xun_dict_get(reparsed, "a"), s, label);
+  free(encoded);
+  xun_free(doc);
+  xun_free(reparsed);
+}
+
+static void test_extreme(void) {
+  const char *must_tag[] = {
+    "0", "00", "012", "08", "8080", "+123", "-123", "-0", "+0",
+    "3.10", "3.", ".5", ".0", "0.", "0.0", "00.1", "-.5", "+.5", "+0.0", "-0.0",
+    "1e3", "1E-3", "1e+10", "0e0", "1E+0", "1e-0", "+1.5e-10", "5.e2", "+.5e2", "-.5E-1",
+    "0xFF", "0Xff", "0x0", "0xabcdef", "0XABCDEF",
+    "0b10", "0B10", "0b0", "0b01",
+    "0o755", "0O7", "0o0", "0o07",
+    "Infinity", "+Infinity", "-Infinity",
+    "9007199254740991", "9007199254740993",
+    "-0x10", "+0x10", "-0b1", "+0b10", "-0o10",
+    " 123",
+    NULL
+  };
+  for (int i = 0; must_tag[i]; i++) {
+    expect_string_roundtrip(must_tag[i], must_tag[i]);
+  }
+  const char *no_tag[] = {
+    "hello", "123abc", "1.2.3", "1e", "0x", "0b2", "0o8",
+    "infinity", "NaN", "true", "1_000", "127.0.0.1", "::1",
+    NULL
+  };
+  for (int i = 0; no_tag[i]; i++) {
+    char src[128];
+    snprintf(src, sizeof src, "a: %s\n", no_tag[i]);
+    expect_encode(src, src, no_tag[i]);
+  }
+  expect_encode("a: \"8080\"\n", "a: !s 8080\n", "quoted 8080");
+  expect_encode("a: !s !x\n", "a: !s !x\n", "special !x");
+  expect_encode("a: !i 0\n", "a: !i 0\n", "int 0");
+  expect_encode("a: !s 3.10\n", "a: !s 3.10\n", "explicit !s");
+  expect_encode("a: 123\r\nb: x\r\n", "a: !s 123\nb: x\n", "CRLF");
+
+  xun_value *doc = NULL;
+  xun_error err;
+  if (xun_parse("\xef\xbb\xbf" "a: hello\n", &doc, &err) != 0) fail("BOM");
+  else {
+    expect_str(xun_dict_get(doc, "a"), "hello", "BOM value");
+    xun_free(doc);
+  }
+
+  char *huge = malloc(1024 * 1024 + 2);
+  memset(huge, 'x', 1024 * 1024 + 1);
+  huge[1024 * 1024 + 1] = 0;
+  if (xun_parse(huge, &doc, &err) == 0) {
+    fail("oversize");
+    xun_free(doc);
+  }
+  free(huge);
+
+  char *d64 = nest_source(64);
+  if (xun_parse(d64, &doc, &err) != 0) fail("decode depth 64");
+  else {
+    char *encoded = NULL;
+    size_t len = 0;
+    if (xun_encode(doc, &encoded, &len) != 0) fail("encode depth 64");
+    else free(encoded);
+    xun_free(doc);
+  }
+  free(d64);
+
+  char *d65 = nest_source(65);
+  if (xun_parse(d65, &doc, &err) == 0) {
+    fail("decode depth 65");
+    xun_free(doc);
+  }
+  free(d65);
+}
+
 int main(int argc, char **argv) {
   const char *root = argc > 1 ? argv[1] : "..";
   test_example(root);
@@ -380,6 +546,8 @@ int main(int argc, char **argv) {
   test_invalid_glyphs_all_tags();
   test_uuid_ip_unpackers();
   test_encode_strips_surrounding_quotes();
+  test_encode_numeric_looking_strings();
+  test_extreme();
   test_extreme_indent_errors();
   expect_err("a: 1\na: 2\n", "duplicate");
   expect_err("x: !f 8080\n", "float");

@@ -139,16 +139,43 @@ class TestEncode(unittest.TestCase):
         self.assertEqual(encode({"a": '""hello world""'}), "a: hello world\n")
         self.assertEqual(encode({"a": '""'}), "a:\n")
         self.assertEqual(encode({"a": '"!x"'}), "a: !s !x\n")
-        self.assertEqual(encode({"a": '"'}), 'a: "\n')
-        self.assertEqual(encode({"a": '"unclosed'}), 'a: "unclosed\n')
+        self.assertEqual(encode({"a": '"'}), 'a: "\\""\n')
+        self.assertEqual(encode({"a": '"unclosed'}), 'a: "\\"unclosed"\n')
         self.assertEqual(encode({"items": ['"a"', '"b"']}), "items:\n  - a\n  - b\n")
         # Tagged values are never stripped.
         self.assertEqual(encode({"a": Tagged("s", '"keep"')}), 'a: !s "keep"\n')
 
+    def test_encode_numeric_looking_strings_with_s_tag(self):
+        self.assertEqual(encode({"a": "123"}), "a: !s 123\n")
+        self.assertEqual(encode({"a": "3.10"}), "a: !s 3.10\n")
+        self.assertEqual(encode({"a": "-1.5"}), "a: !s -1.5\n")
+        self.assertEqual(encode({"a": "1e-3"}), "a: !s 1e-3\n")
+        self.assertEqual(encode({"a": "0xFF"}), "a: !s 0xFF\n")
+        self.assertEqual(encode({"a": "0b10"}), "a: !s 0b10\n")
+        self.assertEqual(encode({"a": "0o755"}), "a: !s 0o755\n")
+        self.assertEqual(encode({"a": "Infinity"}), "a: !s Infinity\n")
+        self.assertEqual(encode({"a": '"8080"'}), "a: !s 8080\n")
+        self.assertEqual(encode({"a": "123 "}), 'a: !s "123 "\n')
+        self.assertEqual(encode({"items": ["80", "443"]}), "items:\n  - !s 80\n  - !s 443\n")
+        self.assertEqual(encode({"a": 123}), "a: !i 123\n")
+        self.assertEqual(encode({"a": "hello"}), "a: hello\n")
+        self.assertEqual(encode({"a": "123abc"}), "a: 123abc\n")
+        self.assertEqual(encode({"a": "1.2.3"}), "a: 1.2.3\n")
+        self.assertEqual(parse("a: 123\n")["a"], "123")
+        self.assertEqual(encode(parse("a: 123\n")), "a: !s 123\n")
+        self.assertEqual(parse('a: "Alice"\n')["a"], "Alice")
+        self.assertEqual(parse('a: !s "3.10 "\n')["a"], "3.10 ")
+
+    def test_encode_quoted_strings(self):
+        self.assertEqual(encode({"a": 'say "hi"'}), 'a: "say \\"hi\\""\n')
+        self.assertEqual(parse('a: "say \\"hi\\""\n')["a"], 'say "hi"')
+        self.assertEqual(parse('a: ""\n')["a"], "")
+        self.assertEqual(encode(parse('a: "123 "\n')), 'a: !s "123 "\n')
+
     def test_file_write_and_read(self):
         data = {
             "app": "python-xun",
-            "version": Tagged("ver", "0.1.4"),
+            "version": Tagged("ver", "0.1.5"),
             "server": {
                 "host": "127.0.0.1",
                 "port": 8080,
@@ -165,7 +192,7 @@ class TestEncode(unittest.TestCase):
             content = Path(path).read_text(encoding="utf-8")
             doc = parse(content)
             self.assertEqual(doc["app"], "python-xun")
-            self.assertEqual(doc["version"], Tagged("ver", "0.1.4"))
+            self.assertEqual(doc["version"], Tagged("ver", "0.1.5"))
             self.assertEqual(doc["server"]["host"], "127.0.0.1")
             self.assertEqual(doc["server"]["port"], 8080)
             self.assertEqual(doc["features"], ["auth", "rate-limit"])

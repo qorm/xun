@@ -36,7 +36,7 @@ Compared with TOML: deep nesting relies naturally on indentation without repeati
 
 #### 1. The Type Coercion Trap
 - **YAML Pitfall**: YAML attempts to "guess" data types from bare tokens, causing `country: NO` to become boolean `false` (the infamous Norway Problem); version numbers like `version: 3.10` are coerced into float `3.1`; and leading zeros like `port: 012` are coerced into octal integers.
-- **XUN Solution**: **Untagged scalars are 100% pure strings** without guessing. When specific data types are required, explicit tags (`!ver 3.10`, `!n 8080`, `!b true`) eliminate all coercion bugs.
+- **XUN Solution**: **Untagged scalars are 100% pure strings** without guessing. When specific data types are required, explicit tags (`!ver 3.10`, `!n 8080`, `!b true`) eliminate all coercion bugs. For **numeric-looking strings** (e.g. `"8080"`, `3.10`), encoders emit `!s`; for **strings with leading/trailing spaces**, quoted `"..."` literals preserve content exactly.
 
 #### 2. Deep Nesting Ergonomics
 - **JSON Pitfall**: Multiple layers of braces, brackets, and trailing commas create visual noise and frequent syntax errors during manual edits.
@@ -266,7 +266,7 @@ Values like `8080`, `true`, `false`, `NO`, and `3.10` are all strings unless pre
 
 | Tag | Meaning | Valid Form Examples | Invalid Examples / Notes |
 | :--- | :--- | :--- | :--- |
-| (none) / `!s` | String | `hello world`, `!s !special` | `!s` used when value starts with `!` |
+| (none) / `!s` | String | `hello world`, `!s !special`, `!s 8080`, `"123 "` | `!s` for explicit strings, values starting with `!`, or numeric-looking glyphs; `"..."` preserves leading/trailing spaces |
 | `!n` | Number (general) | `8080`, `-12`, `3.14`, `1e-3` | `012` (no leading zeros), `1_000` (underscores allowed) |
 | `!i` | Integer | `8080`, `-3`, `1_000` | `1.5`, out-of-range i64 |
 | `!f` | Float | Must contain `.` or `e`: `1.5`, `8080.0`, `1e3` | `!f 8080` (missing dot or exponent) |
@@ -289,6 +289,37 @@ Values like `8080`, `true`, `false`, `NO`, and `3.10` are all strings unless pre
 
 - **Unknown Tags**: Tags like `!sql`, `!md`, `!custom` are valid. The parser preserves the tag name and raw text for upstream applications.
 - **No `null`**: Absence of a key represents missing value. An empty string is written as `key:` with no trailing subtree.
+
+#### 3.1 Quoted Strings
+
+Use double quotes when a string must **preserve leading/trailing spaces** or contain `"` / `\`:
+
+```xun
+port: !s "8080 "
+name: " Alice"
+note: "say \"hi\""
+empty: ""
+```
+
+Rules:
+
+- `"..."` is a quoted string literal; internal spaces and characters are **preserved exactly**
+- Escapes supported: `\"` (quote), `\\` (backslash)
+- `""` denotes an empty string (equivalent to `key:`)
+- Unquoted bare text is read literally; **trailing whitespace is stripped**, so `"123 "` cannot be written as bare `123 `
+
+#### 3.2 String Encoder Disambiguation
+
+All six official encoders automatically resolve two ambiguity classes for safe round-trips (especially with JavaScript):
+
+| Condition | Encoded as | Example |
+| :--- | :--- | :--- |
+| String glyph parseable by JS `Number()` | Prefix `!s` | `"8080"` → `!s 8080` |
+| String has leading/trailing spaces or `"`/`\` | Wrap in `"..."` | `"123 "` → `"123 "` |
+| Both conditions | `!s` + quotes | `"8080 "` → `!s "8080 "` |
+| Plain text | Bare output | `"hello"` → `hello` |
+
+On decode: **untagged scalars are always strings**; quoted strings follow §3.1; tagged values (e.g. `!i 8080`) parse as their declared type.
 
 ### 4. Arrays (Compact and Block Form)
 
@@ -345,19 +376,23 @@ Follow these rules to ensure 100% compliant XUN generation:
 ### Golden Rules Checklist
 1. **Strict 2-Space Indent**: Never use tabs; indent exactly 2 spaces per level.
 2. **Colon Followed by Space**: Write `key: value`, never `key:value`.
-3. **No Quotes by Default**: Do not wrap strings in `"` or `'`. Writing `name: "Alice"` will keep the quotes as part of the string value. (When *encoding*, the encoders in all 6 languages automatically strip a paired set of surrounding double quotes, so JSON-style `"Alice"` is emitted as plain `Alice`.)
-4. **Explicit Type Tags**: Use `!n 8080` / `!i 8080` for numbers, `!b true` for booleans; otherwise they remain strings.
-5. **Always Close Multiline Blocks**: Every multiline block starting with `|` must end with `|` at the matching indentation level.
-6. **Explicit Empty Containers**: Write `{}` for empty dictionaries, `[]` for empty lists.
-7. **No Null**: Omit the key entirely or use `key:` for an empty string.
+3. **No Quotes by Default**: Write plain strings as `name: Alice` without wrapping in `"..."`. (Encoders strip paired outer quotes from JSON-style input.)
+4. **Numeric-looking strings need `!s`**: When the string content looks like a number (`8080`, `3.10`, `0xFF`), write `!s 8080` — never bare `8080` (JS hosts may coerce it to a real number).
+5. **Spaces require quotes**: To preserve leading/trailing spaces, write `"123 "` or `!s "8080 "` — never bare `123 ` (trailing space is stripped from unquoted lines).
+6. **Explicit Type Tags**: Use `!n 8080` / `!i 8080` for numbers, `!b true` for booleans; otherwise they remain strings.
+7. **Always Close Multiline Blocks**: Every multiline block starting with `|` must end with `|` at the matching indentation level.
+8. **Explicit Empty Containers**: Write `{}` for empty dictionaries, `[]` for empty lists.
+9. **No Null**: Omit the key entirely or use `key:` for an empty string.
 
 ### Pattern Comparison (Do's & Don'ts)
 
 | Scenario | ❌ Incorrect | ✅ Correct | Reason |
 | :--- | :--- | :--- | :--- |
 | **Colon space** | `port:8080` | `port: !n 8080` | Space required after `:` |
-| **String quotes** | `name: "Alice"` | `name: Alice` | Quotes are preserved as literal characters; encoders strip surrounding `"…"` pairs automatically |
+| **String quotes** | `name: "Alice"` (plain text) | `name: Alice` | Plain strings need no quotes; decoding `"Alice"` also yields `Alice` |
 | **Numeric value** | `count: 10` (wants integer) | `count: !i 10` or `!n 10` | Untagged scalar is parsed as string `"10"` |
+| **Numeric-looking string** | `code: 8080` (wants string) | `code: !s 8080` | Encoders auto-prefix `!s` for glyphs JS `Number()` would coerce |
+| **Spaced string** | `id: 123 ` (bare trailing space) | `id: !s "123 "` | Quotes preserve spaces; unquoted trailing space is stripped |
 | **Boolean value** | `enabled: true` (wants bool) | `enabled: !b true` | Untagged `true` is parsed as string `"true"` |
 | **Float value** | `rate: !f 100` | `rate: !f 100.0` | `!f` requires a dot `.` or exponent `e` |
 | **String array** | `tags: !s[a, b]` | `tags: !s[]`<br>`  - a`<br>`  - b` | String arrays cannot use compact comma form |

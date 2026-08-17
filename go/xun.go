@@ -406,6 +406,13 @@ func (p *parser) parseValue(raw string, parentIndent, lineNo, depth int) any {
 	if raw == "" {
 		return p.parseEmptyOrNested(parentIndent, lineNo, depth, "")
 	}
+	if strings.HasPrefix(raw, `"`) {
+		s, err := parseQuotedString(raw, lineNo)
+		if err != nil {
+			panic(err)
+		}
+		return s
+	}
 	return raw
 }
 
@@ -450,7 +457,7 @@ func (p *parser) parseTagged(raw string, parentIndent, lineNo, depth int) any {
 		return applyTag(tag, text, lineNo)
 	}
 	if tag == "s" {
-		return body
+		return parseStringBody(body, lineNo)
 	}
 	return applyTag(tag, body, lineNo)
 }
@@ -581,8 +588,9 @@ var (
 	duRe       = regexp.MustCompile(`^(\d+d)?(\d+h)?(\d+m)?(\d+(\.\d+)?s)?$`)
 	szRe       = regexp.MustCompile(`^\d+(\.\d+)?(B|KB|MB|GB|TB|PB|KiB|MiB|GiB|TiB|PiB)$`)
 	verRe      = regexp.MustCompile(`^\d+(\.\d+)*$`)
-	uuidRe     = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
-	cpRe       = regexp.MustCompile(`^U\+([0-9A-Fa-f]{4,6})$`)
+	uuidRe      = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
+	cpRe        = regexp.MustCompile(`^U\+([0-9A-Fa-f]{4,6})$`)
+	jsNumberRe  = regexp.MustCompile(`^[ \t\n\r\f\v]*[+-]?(?:Infinity|0[xX][0-9a-fA-F]+|0[bB][01]+|0[oO][0-7]+|(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?)[ \t\n\r\f\v]*$`)
 )
 
 func applyTag(tag, glyph string, n int) any {
@@ -864,6 +872,85 @@ func stripSurroundingQuotes(s string) string {
 	return s
 }
 
+// needsStringTag reports whether a string glyph would be ambiguous untagged:
+// syntactic specials, or a token JavaScript Number() would coerce to a number.
+func needsStringTag(s string) bool {
+	return strings.HasPrefix(s, "!") || s == "[]" || s == "{}" || strings.HasPrefix(s, "|") || jsNumberRe.MatchString(s)
+}
+
+func parseQuotedString(raw string, lineNo int) (string, error) {
+	if !strings.HasPrefix(raw, `"`) {
+		return "", &Error{Line: lineNo, Msg: `quoted string must start with '"'`}
+	}
+	var out strings.Builder
+	for i := 1; i < len(raw); i++ {
+		ch := raw[i]
+		if ch == '\\' {
+			if i+1 >= len(raw) {
+				return "", &Error{Line: lineNo, Msg: "unclosed escape in quoted string"}
+			}
+			nxt := raw[i+1]
+			if nxt == '\\' || nxt == '"' {
+				out.WriteByte(nxt)
+				i++
+				continue
+			}
+			return "", &Error{Line: lineNo, Msg: fmt.Sprintf("invalid escape \\%c in quoted string", nxt)}
+		}
+		if ch == '"' {
+			if i != len(raw)-1 {
+				return "", &Error{Line: lineNo, Msg: "unexpected trailing content after quoted string"}
+			}
+			return out.String(), nil
+		}
+		out.WriteByte(ch)
+	}
+	return "", &Error{Line: lineNo, Msg: "unclosed quoted string"}
+}
+
+func needsQuotedGlyph(s string) bool {
+	return strings.TrimSpace(s) != s || strings.ContainsAny(s, `"\\`)
+}
+
+func quoteGlyph(s string) string {
+	var b strings.Builder
+	b.WriteByte('"')
+	for i := 0; i < len(s); i++ {
+		switch s[i] {
+		case '\\':
+			b.WriteString(`\\`)
+		case '"':
+			b.WriteString(`\"`)
+		default:
+			b.WriteByte(s[i])
+		}
+	}
+	b.WriteByte('"')
+	return b.String()
+}
+
+func encodeStringGlyph(s string) string {
+	body := s
+	if needsQuotedGlyph(s) {
+		body = quoteGlyph(s)
+	}
+	if needsStringTag(s) {
+		return "!s " + body
+	}
+	return body
+}
+
+func parseStringBody(body string, lineNo int) any {
+	if strings.HasPrefix(body, `"`) {
+		s, err := parseQuotedString(body, lineNo)
+		if err != nil {
+			panic(err)
+		}
+		return s
+	}
+	return body
+}
+
 func encodeKeyVal(indent, key string, val any, depth int, lines *[]string) {
 	if val == nil {
 		*lines = append(*lines, fmt.Sprintf("%s%s:", indent, key))
@@ -898,11 +985,7 @@ func encodeKeyVal(indent, key string, val any, depth int, lines *[]string) {
 		} else if v == "" {
 			*lines = append(*lines, fmt.Sprintf("%s%s:", indent, key))
 		} else {
-			if strings.HasPrefix(v, "!") || v == "[]" || v == "{}" || strings.HasPrefix(v, "|") {
-				*lines = append(*lines, fmt.Sprintf("%s%s: !s %s", indent, key, v))
-			} else {
-				*lines = append(*lines, fmt.Sprintf("%s%s: %s", indent, key, v))
-			}
+			*lines = append(*lines, fmt.Sprintf("%s%s: %s", indent, key, encodeStringGlyph(v)))
 		}
 	case bool:
 		bStr := "false"
@@ -984,11 +1067,7 @@ func encodeListItem(indent string, val any, depth int, lines *[]string) {
 		} else if v == "" {
 			*lines = append(*lines, fmt.Sprintf("%s-", indent))
 		} else {
-			if strings.HasPrefix(v, "!") || v == "[]" || v == "{}" || strings.HasPrefix(v, "|") {
-				*lines = append(*lines, fmt.Sprintf("%s- !s %s", indent, v))
-			} else {
-				*lines = append(*lines, fmt.Sprintf("%s- %s", indent, v))
-			}
+			*lines = append(*lines, fmt.Sprintf("%s- %s", indent, encodeStringGlyph(v)))
 		}
 	case bool:
 		bStr := "false"

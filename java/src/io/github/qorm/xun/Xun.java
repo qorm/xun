@@ -363,6 +363,9 @@ public final class Xun {
       if (raw.isEmpty()) {
         return parseEmptyOrNested(parentIndent, lineNo, depth, null);
       }
+      if (raw.startsWith("\"")) {
+        return parseQuotedString(raw, lineNo);
+      }
       return raw;
     }
 
@@ -396,7 +399,7 @@ public final class Xun {
         if (tag.equals("s")) return text;
         return applyTag(tag, text, lineNo);
       }
-      if (tag.equals("s")) return body;
+      if (tag.equals("s")) return parseStringBody(body, lineNo);
       return applyTag(tag, body, lineNo);
     }
 
@@ -494,6 +497,67 @@ public final class Xun {
       s = s.substring(1, s.length() - 1);
     }
     return s;
+  }
+
+  // Glyphs that JavaScript Number() would coerce, plus syntactic specials.
+  private static final Pattern LOOKS_LIKE_JS_NUMBER =
+      Pattern.compile(
+          "^[ \\t\\n\\r\\f\\u000b]*[+-]?(?:Infinity|0[xX][0-9a-fA-F]+|0[bB][01]+|0[oO][0-7]+|(?:\\d+\\.?\\d*|\\.\\d+)(?:[eE][+-]?\\d+)?)[ \\t\\n\\r\\f\\u000b]*$");
+
+  private static boolean needsStringTag(String s) {
+    return s.startsWith("!")
+        || s.equals("[]")
+        || s.equals("{}")
+        || s.startsWith("|")
+        || LOOKS_LIKE_JS_NUMBER.matcher(s).matches();
+  }
+
+  private static String parseQuotedString(String raw, int lineNo) {
+    if (!raw.startsWith("\"")) throw new Error("quoted string must start with '\"'", lineNo);
+    StringBuilder out = new StringBuilder();
+    for (int i = 1; i < raw.length(); i++) {
+      char ch = raw.charAt(i);
+      if (ch == '\\') {
+        if (i + 1 >= raw.length()) throw new Error("unclosed escape in quoted string", lineNo);
+        char next = raw.charAt(++i);
+        if (next == '\\' || next == '"') {
+          out.append(next);
+          continue;
+        }
+        throw new Error("invalid escape \\" + next + " in quoted string", lineNo);
+      }
+      if (ch == '"') {
+        if (i != raw.length() - 1) throw new Error("unexpected trailing content after quoted string", lineNo);
+        return out.toString();
+      }
+      out.append(ch);
+    }
+    throw new Error("unclosed quoted string", lineNo);
+  }
+
+  private static boolean needsQuotedGlyph(String s) {
+    return !s.equals(s.trim()) || s.indexOf('"') >= 0 || s.indexOf('\\') >= 0;
+  }
+
+  private static String quoteGlyph(String s) {
+    StringBuilder out = new StringBuilder("\"");
+    for (int i = 0; i < s.length(); i++) {
+      char ch = s.charAt(i);
+      if (ch == '\\') out.append("\\\\");
+      else if (ch == '"') out.append("\\\"");
+      else out.append(ch);
+    }
+    return out.append('"').toString();
+  }
+
+  private static String encodeStringGlyph(String s) {
+    String body = needsQuotedGlyph(s) ? quoteGlyph(s) : s;
+    return needsStringTag(s) ? "!s " + body : body;
+  }
+
+  private static String parseStringBody(String body, int lineNo) {
+    if (body.startsWith("\"")) return parseQuotedString(body, lineNo);
+    return body;
   }
 
   /** Convert a java.time.Duration into a XUN !du glyph (e.g. 1h30m15s). */
@@ -728,10 +792,8 @@ public final class Xun {
           lines.add(indent + "|");
         } else if (s.isEmpty()) {
           lines.add(indent + key + ":");
-        } else if (s.startsWith("!") || s.equals("[]") || s.equals("{}") || s.startsWith("|")) {
-          lines.add(indent + key + ": !s " + s);
         } else {
-          lines.add(indent + key + ": " + s);
+          lines.add(indent + key + ": " + encodeStringGlyph(s));
         }
       } else if (v instanceof Boolean) {
         lines.add(indent + key + ": !b " + (((Boolean) v) ? "true" : "false"));
@@ -819,10 +881,8 @@ public final class Xun {
           lines.add(indent + "|");
         } else if (s.isEmpty()) {
           lines.add(indent + "-");
-        } else if (s.startsWith("!") || s.equals("[]") || s.equals("{}") || s.startsWith("|")) {
-          lines.add(indent + "- !s " + s);
         } else {
-          lines.add(indent + "- " + s);
+          lines.add(indent + "- " + encodeStringGlyph(s));
         }
       } else if (v instanceof Boolean) {
         lines.add(indent + "- !b " + (((Boolean) v) ? "true" : "false"));

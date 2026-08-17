@@ -26,6 +26,8 @@ public final class XunTest {
     testStringCompact();
     testEncodeAndRoundTrip();
     testEncodeStripsSurroundingQuotes();
+    testEncodeNumericLookingStrings();
+    testExtreme();
     testUnpackNewHelpers();
     testFileWriteAndRead();
     testSymmetricAndUnpack();
@@ -142,6 +144,162 @@ custom_v: !sql SELECT * FROM users
         "strip surrounding quotes");
   }
 
+  static void testEncodeNumericLookingStrings() {
+    eq(Xun.encode(Map.of("a", "123")), "a: !s 123\n", "str 123");
+    eq(Xun.encode(Map.of("a", "3.10")), "a: !s 3.10\n", "str 3.10");
+    eq(Xun.encode(Map.of("a", "-1.5")), "a: !s -1.5\n", "str -1.5");
+    eq(Xun.encode(Map.of("a", "1e-3")), "a: !s 1e-3\n", "str 1e-3");
+    eq(Xun.encode(Map.of("a", "0xFF")), "a: !s 0xFF\n", "str 0xFF");
+    eq(Xun.encode(Map.of("a", "0b10")), "a: !s 0b10\n", "str 0b10");
+    eq(Xun.encode(Map.of("a", "0o755")), "a: !s 0o755\n", "str 0o755");
+    eq(Xun.encode(Map.of("a", "Infinity")), "a: !s Infinity\n", "str Infinity");
+    eq(Xun.encode(Map.of("a", "\"8080\"")), "a: !s 8080\n", "quoted 8080");
+    eq(Xun.encode(Map.of("a", "123 ")), "a: !s \"123 \"\n", "str trailing space");
+    Map<String, Object> items = new LinkedHashMap<>();
+    items.put("items", List.of("80", "443"));
+    eq(Xun.encode(items), "items:\n  - !s 80\n  - !s 443\n", "list numeric strings");
+    eq(Xun.encode(Map.of("a", 123)), "a: !i 123\n", "int 123");
+    eq(Xun.encode(Map.of("a", "hello")), "a: hello\n", "plain hello");
+    eq(Xun.encode(Map.of("a", "123abc")), "a: 123abc\n", "123abc");
+    eq(Xun.encode(Map.of("a", "1.2.3")), "a: 1.2.3\n", "version-like");
+    eq(Xun.parse("a: 123\n").get("a"), "123", "untagged decode stays string");
+    eq(Xun.encode(Xun.parse("a: 123\n")), "a: !s 123\n", "re-encode untagged number");
+    eq(Xun.parse("a: \"123 \"\n").get("a"), "123 ", "quoted trailing space");
+    eq(Xun.encode(Xun.parse("a: \"123 \"\n")), "a: !s \"123 \"\n", "quoted round-trip");
+    eq(Xun.parse("a: \"\"\n").get("a"), "", "quoted empty");
+  }
+
+  static final String[] MUST_TAG = {
+    "0", "00", "012", "08", "8080", "+123", "-123", "-0", "+0",
+    "3.10", "3.", ".5", ".0", "0.", "0.0", "00.1", "-.5", "+.5", "+0.0", "-0.0",
+    "1e3", "1E-3", "1e+10", "0e0", "1E+0", "1e-0", "+1.5e-10", "5.e2", "+.5e2", "-.5E-1",
+    "0xFF", "0Xff", "0x0", "0xabcdef", "0XABCDEF",
+    "0b10", "0B10", "0b0", "0b01",
+    "0o755", "0O7", "0o0", "0o07",
+    "Infinity", "+Infinity", "-Infinity",
+    "9007199254740991", "9007199254740993",
+    "-0x10", "+0x10", "-0b1", "+0b10", "-0o10",
+    " 123"
+  };
+
+  static final String[] MUST_NOT_TAG = {
+    "hello", "123abc", "abc123", "1.2.3", "3.1.0",
+    "1e", "1e+", "e3", "e10", "5.e", ".", "+", "-",
+    "0x", "0b", "0o", "0xg", "0xG", "0b2", "0o8", "0x10n", "123n",
+    "infinity", "INFINITY", "Inf", "NaN", "true", "false", "null",
+    "1_000", "1_2", "0xFF_AA", "127.0.0.1", "2026-08-14", "::1"
+  };
+
+  static Map<String, Object> nestEncode(int levels) {
+    Map<String, Object> o = new LinkedHashMap<>();
+    o.put("v", "leaf");
+    for (int i = 0; i < levels; i++) {
+      Map<String, Object> wrap = new LinkedHashMap<>();
+      wrap.put("c", o);
+      o = wrap;
+    }
+    return o;
+  }
+
+  static String nestSource(int levels) {
+    StringBuilder sb = new StringBuilder();
+    for (int i = 0; i < levels; i++) {
+      sb.append("  ".repeat(i)).append("k").append(i).append(":\n");
+    }
+    sb.append("  ".repeat(levels)).append("v: leaf\n");
+    return sb.toString();
+  }
+
+  static String quoteGlyphForTest(String s) {
+    StringBuilder out = new StringBuilder("\"");
+    for (int i = 0; i < s.length(); i++) {
+      char ch = s.charAt(i);
+      if (ch == '\\') out.append("\\\\");
+      else if (ch == '"') out.append("\\\"");
+      else out.append(ch);
+    }
+    return out.append('"').toString();
+  }
+
+  static void testExtreme() {
+    for (String s : MUST_TAG) {
+      boolean quoted = !s.equals(s.trim()) || s.indexOf('"') >= 0 || s.indexOf('\\') >= 0;
+      String body = quoted ? quoteGlyphForTest(s) : s;
+      String text = Xun.encode(Map.of("a", s));
+      eq(text, "a: !s " + body + "\n", "encode " + s);
+      eq(Xun.parse(text).get("a"), s, "round-trip " + s);
+    }
+    for (String s : MUST_NOT_TAG) {
+      eq(Xun.encode(Map.of("a", s)), "a: " + s + "\n", "untagged " + s);
+    }
+    eq(Xun.encode(Map.of("a", "!x")), "a: !s !x\n", "special !x");
+    eq(Xun.encode(Map.of("a", "[]")), "a: !s []\n", "special []");
+    eq(Xun.encode(Map.of("a", "{}")), "a: !s {}\n", "special {}");
+    eq(Xun.encode(Map.of("a", "|foo")), "a: !s |foo\n", "special |");
+    eq(Xun.encode(Map.of("a", "\"8080\"")), "a: !s 8080\n", "quoted 8080");
+    eq(Xun.encode(Map.of("a", 0)), "a: !i 0\n", "int 0");
+    eq(Xun.encode(Map.of("a", 3.14)), "a: !f 3.14\n", "float");
+    eq(Xun.encode(Map.of("a", true)), "a: !b true\n", "bool");
+
+    Map<String, Object> data = new LinkedHashMap<>();
+    data.put("ports", List.of("80", "443", "8080"));
+    data.put("mixed", List.of("1", 1, "x"));
+    Map<String, Object> inner = new LinkedHashMap<>();
+    inner.put("code", "007");
+    Map<String, Object> deep = new LinkedHashMap<>();
+    deep.put("inner", inner);
+    data.put("deep", deep);
+    Map<String, Object> doc = Xun.parse(Xun.encode(data));
+    eq(doc.get("ports"), List.of("80", "443", "8080"), "ports");
+    @SuppressWarnings("unchecked")
+    List<Object> mixed = (List<Object>) doc.get("mixed");
+    eq(mixed.get(0), "1", "mixed str");
+    eq(mixed.get(1), 1L, "mixed int");
+
+    Map<String, Object> untagged = Xun.parse("a: 123\nb: 3.10\nc: 0xFF\nd: Infinity\ne: true\n");
+    eq(untagged.get("a"), "123", "untagged a");
+    eq(Xun.encode(untagged), "a: !s 123\nb: !s 3.10\nc: !s 0xFF\nd: !s Infinity\ne: true\n", "re-encode");
+
+    eq(Xun.parse(""), Map.of(), "empty");
+    eq(Xun.parse("\uFEFFa: hello\n").get("a"), "hello", "BOM");
+    throwsXun("a: ok\0no\n", "NUL");
+    throwsXun("x".repeat(1024 * 1024 + 1), "oversize");
+    Xun.parse(nestSource(64));
+    throwsXun(nestSource(65), "decode depth 65");
+
+    String deepText = Xun.encode(nestEncode(64));
+    Map<String, Object> cur = Xun.parse(deepText);
+    for (int i = 0; i < 64; i++) {
+      @SuppressWarnings("unchecked")
+      Map<String, Object> next = (Map<String, Object>) cur.get("c");
+      cur = next;
+    }
+    eq(cur.get("v"), "leaf", "encode depth 64 leaf");
+    try {
+      Xun.encode(nestEncode(65));
+      fail("encode depth 65: expected error");
+    } catch (Xun.Error ignored) {
+    }
+    try {
+      Xun.encode(Map.of("", "x"));
+      fail("empty key: expected error");
+    } catch (Xun.Error ignored) {
+    }
+    try {
+      Xun.encode(Map.of("a: b", "x"));
+      fail("colon key: expected error");
+    } catch (Xun.Error ignored) {
+    }
+
+    String keys = Xun.encode(Map.of("8080", "8080", "3.10", "3.10"));
+    if (!keys.contains("8080: !s 8080") || !keys.contains("3.10: !s 3.10")) {
+      fail("numeric keys: " + keys);
+    }
+    eq(Xun.encode(Map.of("a", "123\n456")), "a: |\n  123\n  456\n|\n", "multiline");
+    eq(Xun.parse("a: 123\r\nb: x\r\n").get("a"), "123", "CRLF");
+    eq(Xun.parse("a: !s 3.10\n").get("a"), "3.10", "explicit !s");
+  }
+
   static void testUnpackNewHelpers() throws Exception {
     Xun.Tagged tz = new Xun.Tagged("tz", "Asia/Shanghai");
     eq(tz.toZoneId(), java.time.ZoneId.of("Asia/Shanghai"), "toZoneId");
@@ -172,7 +330,7 @@ custom_v: !sql SELECT * FROM users
   static void testFileWriteAndRead() throws Exception {
     Map<String, Object> data = new LinkedHashMap<>();
     data.put("app", "java-xun");
-    data.put("version", new Xun.Tagged("ver", "0.1.4"));
+    data.put("version", new Xun.Tagged("ver", "0.1.5"));
     data.put("port", 8080L);
     data.put("tags", List.of("jvm", "xun"));
     data.put("raw", new byte[] {(byte) 0x12, (byte) 0x34});
@@ -186,7 +344,7 @@ custom_v: !sql SELECT * FROM users
       String content = Files.readString(tmp);
       Map<String, Object> parsed = Xun.parse(content);
       eq(parsed.get("app"), "java-xun", "file app");
-      eq(parsed.get("version"), new Xun.Tagged("ver", "0.1.4"), "file ver");
+      eq(parsed.get("version"), new Xun.Tagged("ver", "0.1.5"), "file ver");
       eq(parsed.get("port"), 8080L, "file port");
       eq(parsed.get("tags"), List.of("jvm", "xun"), "file tags");
       eq(parsed.get("raw"), new byte[] {(byte) 0x12, (byte) 0x34}, "file raw");

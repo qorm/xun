@@ -126,17 +126,48 @@ test("encode strips surrounding double-quote pairs", () => {
   assert.equal(encode({ a: '""hello world""' }), "a: hello world\n");
   assert.equal(encode({ a: '""' }), "a:\n");
   assert.equal(encode({ a: '"!x"' }), "a: !s !x\n");
-  assert.equal(encode({ a: '"' }), "a: \"\n");
-  assert.equal(encode({ a: '"unclosed' }), "a: \"unclosed\n");
+  assert.equal(encode({ a: '"' }), 'a: "\\""\n');
+  assert.equal(encode({ a: '"unclosed' }), 'a: "\\"unclosed"\n');
   assert.equal(encode({ items: ['"a"', '"b"'] }), "items:\n  - a\n  - b\n");
   // Tagged values are never stripped.
   assert.equal(encode({ a: new Tagged("s", '"keep"') }), "a: !s \"keep\"\n");
 });
 
+test("encode numeric-looking strings with !s", () => {
+  assert.equal(encode({ a: "123" }), "a: !s 123\n");
+  assert.equal(encode({ a: "3.10" }), "a: !s 3.10\n");
+  assert.equal(encode({ a: "-1.5" }), "a: !s -1.5\n");
+  assert.equal(encode({ a: "1e-3" }), "a: !s 1e-3\n");
+  assert.equal(encode({ a: "0xFF" }), "a: !s 0xFF\n");
+  assert.equal(encode({ a: "0b10" }), "a: !s 0b10\n");
+  assert.equal(encode({ a: "0o755" }), "a: !s 0o755\n");
+  assert.equal(encode({ a: "Infinity" }), "a: !s Infinity\n");
+  assert.equal(encode({ a: '"8080"' }), "a: !s 8080\n");
+  assert.equal(encode({ a: "123 " }), 'a: !s "123 "\n');
+  assert.equal(encode({ items: ["80", "443"] }), "items:\n  - !s 80\n  - !s 443\n");
+  // Actual numbers still use numeric tags.
+  assert.equal(encode({ a: 123 }), "a: !i 123\n");
+  // Non-numeric strings stay untagged.
+  assert.equal(encode({ a: "hello" }), "a: hello\n");
+  assert.equal(encode({ a: "123abc" }), "a: 123abc\n");
+  assert.equal(encode({ a: "1.2.3" }), "a: 1.2.3\n");
+  // Decode still treats untagged numbers as strings.
+  assert.equal(decode("a: 123\n").a, "123");
+  assert.equal(encode(decode("a: 123\n")), "a: !s 123\n");
+  assert.equal(decode('a: "Alice"\n').a, "Alice");
+  assert.equal(decode('a: !s "3.10 "\n').a, "3.10 ");
+});
+
+test("encode quoted escape sequences", () => {
+  assert.equal(encode({ a: 'say "hi"' }), 'a: "say \\"hi\\""\n');
+  assert.equal(decode('a: "say \\"hi\\""\n').a, 'say "hi"');
+  assert.equal(encode({ a: "path\\to" }), 'a: "path\\\\to"\n');
+});
+
 test("file write and read round-trip", () => {
   const data = {
     app: "xun-demo",
-    version: new Tagged("ver", "0.1.4"),
+    version: new Tagged("ver", "0.1.5"),
     server: {
       host: "0.0.0.0",
       port: 9000,
@@ -157,7 +188,7 @@ test("file write and read round-trip", () => {
     const doc = decode(readText);
 
     assert.equal(doc.app, "xun-demo");
-    assert.deepEqual(doc.version, new Tagged("ver", "0.1.4"));
+    assert.deepEqual(doc.version, new Tagged("ver", "0.1.5"));
     assert.equal(doc.server.host, "0.0.0.0");
     assert.equal(doc.server.port, 9000);
     assert.equal(doc.server.ssl, true);

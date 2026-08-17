@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -136,7 +138,7 @@ func TestEncodeAndRoundTrip(t *testing.T) {
 func TestFileWriteAndRead(t *testing.T) {
 	data := map[string]any{
 		"app":     "go-xun",
-		"version": Tagged{Tag: "ver", Value: "0.1.4"},
+		"version": Tagged{Tag: "ver", Value: "0.1.5"},
 		"server": map[string]any{
 			"host": "0.0.0.0",
 			"port": int64(9000),
@@ -170,7 +172,7 @@ func TestFileWriteAndRead(t *testing.T) {
 	if m["app"] != "go-xun" {
 		t.Fatalf("app mismatch: %v", m["app"])
 	}
-	if m["version"].(Tagged) != (Tagged{Tag: "ver", Value: "0.1.4"}) {
+	if m["version"].(Tagged) != (Tagged{Tag: "ver", Value: "0.1.5"}) {
 		t.Fatalf("version mismatch: %v", m["version"])
 	}
 	if m["multiline"] != "First\nSecond\nThird" {
@@ -354,8 +356,8 @@ func TestEncodeStripsSurroundingQuotes(t *testing.T) {
 		{map[string]any{"a": `""hello world""`}, "a: hello world\n"},
 		{map[string]any{"a": `""`}, "a:\n"},
 		{map[string]any{"a": `"!x"`}, "a: !s !x\n"},
-		{map[string]any{"a": `"`}, "a: \"\n"},
-		{map[string]any{"a": `"unclosed`}, "a: \"unclosed\n"},
+		{map[string]any{"a": `"`}, "a: \"\\\"\"\n"},
+		{map[string]any{"a": `"unclosed`}, "a: \"\\\"unclosed\"\n"},
 		{map[string]any{"items": []any{`"a"`, `"b"`}}, "items:\n  - a\n  - b\n"},
 		{map[string]any{"a": Tagged{Tag: "s", Value: `"keep"`}}, "a: !s \"keep\"\n"},
 	}
@@ -367,6 +369,62 @@ func TestEncodeStripsSurroundingQuotes(t *testing.T) {
 		if got != c.want {
 			t.Fatalf("quote strip mismatch:\n got: %q\nwant: %q", got, c.want)
 		}
+	}
+}
+
+func TestEncodeNumericLookingStrings(t *testing.T) {
+	cases := []struct {
+		in   map[string]any
+		want string
+	}{
+		{map[string]any{"a": "123"}, "a: !s 123\n"},
+		{map[string]any{"a": "3.10"}, "a: !s 3.10\n"},
+		{map[string]any{"a": "-1.5"}, "a: !s -1.5\n"},
+		{map[string]any{"a": "1e-3"}, "a: !s 1e-3\n"},
+		{map[string]any{"a": "0xFF"}, "a: !s 0xFF\n"},
+		{map[string]any{"a": "0b10"}, "a: !s 0b10\n"},
+		{map[string]any{"a": "0o755"}, "a: !s 0o755\n"},
+		{map[string]any{"a": "Infinity"}, "a: !s Infinity\n"},
+		{map[string]any{"a": `"8080"`}, "a: !s 8080\n"},
+		{map[string]any{"a": "123 "}, "a: !s \"123 \"\n"},
+		{map[string]any{"items": []any{"80", "443"}}, "items:\n  - !s 80\n  - !s 443\n"},
+		{map[string]any{"a": 123}, "a: !i 123\n"},
+		{map[string]any{"a": "hello"}, "a: hello\n"},
+		{map[string]any{"a": "123abc"}, "a: 123abc\n"},
+		{map[string]any{"a": "1.2.3"}, "a: 1.2.3\n"},
+	}
+	for _, c := range cases {
+		got, err := Encode(c.in)
+		if err != nil {
+			t.Fatalf("encode error: %v", err)
+		}
+		if got != c.want {
+			t.Fatalf("numeric string tag mismatch:\n got: %q\nwant: %q", got, c.want)
+		}
+	}
+	doc, err := Decode("a: 123\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if doc.(map[string]any)["a"] != "123" {
+		t.Fatalf("untagged decode should stay string, got %v", doc.(map[string]any)["a"])
+	}
+	encoded, err := Encode(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if encoded != "a: !s 123\n" {
+		t.Fatalf("re-encode untagged number: got %q", encoded)
+	}
+	doc2, err := Decode("a: \"123 \"\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if doc2.(map[string]any)["a"] != "123 " {
+		t.Fatalf("quoted spaces: got %v", doc2.(map[string]any)["a"])
+	}
+	if got, _ := Encode(doc2); got != "a: !s \"123 \"\n" {
+		t.Fatalf("quoted re-encode: got %q", got)
 	}
 }
 
@@ -541,5 +599,215 @@ char_cp: !c U+4E2D
 	}
 	if !bytes.Equal(m["b64_v"].([]byte), []byte("Hello")) {
 		t.Fatalf("b64 round-trip mismatch: %v", m["b64_v"])
+	}
+}
+
+var mustTag = []string{
+	"0", "00", "012", "08", "8080", "+123", "-123", "-0", "+0",
+	"3.10", "3.", ".5", ".0", "0.", "0.0", "00.1", "-.5", "+.5", "+0.0", "-0.0",
+	"1e3", "1E-3", "1e+10", "0e0", "1E+0", "1e-0", "+1.5e-10", "5.e2", "+.5e2", "-.5E-1",
+	"0xFF", "0Xff", "0x0", "0xabcdef", "0XABCDEF",
+	"0b10", "0B10", "0b0", "0b01",
+	"0o755", "0O7", "0o0", "0o07",
+	"Infinity", "+Infinity", "-Infinity",
+	"9007199254740991", "9007199254740993",
+	"-0x10", "+0x10", "-0b1", "+0b10", "-0o10",
+	" 123",
+}
+
+var mustNotTag = []string{
+	"hello", "123abc", "abc123", "1.2.3", "3.1.0",
+	"1e", "1e+", "e3", "e10", "5.e", ".", "+", "-",
+	"0x", "0b", "0o", "0xg", "0xG", "0b2", "0o8", "0x10n", "123n",
+	"infinity", "INFINITY", "Inf", "NaN", "true", "false", "null",
+	"1_000", "1_2", "0xFF_AA", "127.0.0.1", "2026-08-14", "::1",
+}
+
+func nestEncode(levels int) map[string]any {
+	o := map[string]any{"v": "leaf"}
+	for i := 0; i < levels; i++ {
+		o = map[string]any{"c": o}
+	}
+	return o
+}
+
+func nestSource(levels int) string {
+	var b strings.Builder
+	for i := 0; i < levels; i++ {
+		b.WriteString(strings.Repeat("  ", i))
+		b.WriteString("k")
+		b.WriteString(strconv.Itoa(i))
+		b.WriteString(":\n")
+	}
+	b.WriteString(strings.Repeat("  ", levels))
+	b.WriteString("v: leaf\n")
+	return b.String()
+}
+
+func TestExtremeNumericLookingStrings(t *testing.T) {
+	for _, s := range mustTag {
+		quoted := strings.TrimSpace(s) != s || strings.ContainsAny(s, `"\\`)
+		body := s
+		if quoted {
+			body = quoteGlyph(s)
+		}
+		want := "a: !s " + body + "\n"
+		got, err := Encode(map[string]any{"a": s})
+		if err != nil {
+			t.Fatalf("%q encode: %v", s, err)
+		}
+		if got != want {
+			t.Fatalf("encode %q:\n got %q\nwant %q", s, got, want)
+		}
+		doc, err := Decode(got)
+		if err != nil {
+			t.Fatalf("%q decode: %v", s, err)
+		}
+		if doc.(map[string]any)["a"] != s {
+			t.Fatalf("round-trip %q: got %v", s, doc.(map[string]any)["a"])
+		}
+	}
+}
+
+func TestExtremeNonNumericStayUntagged(t *testing.T) {
+	for _, s := range mustNotTag {
+		got, err := Encode(map[string]any{"a": s})
+		if err != nil {
+			t.Fatalf("%q encode: %v", s, err)
+		}
+		if got != "a: "+s+"\n" {
+			t.Fatalf("encode %q: got %q", s, got)
+		}
+	}
+}
+
+func TestExtremeSpecialsQuotesLists(t *testing.T) {
+	cases := []struct {
+		in   map[string]any
+		want string
+	}{
+		{map[string]any{"a": "!x"}, "a: !s !x\n"},
+		{map[string]any{"a": "[]"}, "a: !s []\n"},
+		{map[string]any{"a": "{}"}, "a: !s {}\n"},
+		{map[string]any{"a": "|foo"}, "a: !s |foo\n"},
+		{map[string]any{"a": "|"}, "a: !s |\n"},
+		{map[string]any{"a": `"8080"`}, "a: !s 8080\n"},
+		{map[string]any{"a": 0}, "a: !i 0\n"},
+		{map[string]any{"a": 123}, "a: !i 123\n"},
+		{map[string]any{"a": -7}, "a: !i -7\n"},
+		{map[string]any{"a": 3.14}, "a: !f 3.14\n"},
+		{map[string]any{"a": true}, "a: !b true\n"},
+		{map[string]any{"a": ""}, "a:\n"},
+		{map[string]any{"a": "123\n456"}, "a: |\n  123\n  456\n|\n"},
+	}
+	for _, c := range cases {
+		got, err := Encode(c.in)
+		if err != nil {
+			t.Fatalf("encode %#v: %v", c.in, err)
+		}
+		if got != c.want {
+			t.Fatalf("got %q want %q", got, c.want)
+		}
+	}
+	data := map[string]any{
+		"ports": []any{"80", "443", "8080"},
+		"mixed": []any{"1", 1, "x"},
+		"deep":  map[string]any{"inner": map[string]any{"code": "007"}},
+	}
+	text, err := Encode(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc, err := Decode(text)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := doc.(map[string]any)
+	ports := m["ports"].([]any)
+	if ports[0] != "80" || ports[2] != "8080" {
+		t.Fatalf("ports: %v", ports)
+	}
+	mixed := m["mixed"].([]any)
+	if mixed[0] != "1" || mixed[1] != int64(1) {
+		t.Fatalf("mixed: %v", mixed)
+	}
+}
+
+func TestExtremeUntaggedReencode(t *testing.T) {
+	doc, err := Decode("a: 123\nb: 3.10\nc: 0xFF\nd: Infinity\ne: true\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := doc.(map[string]any)
+	if m["a"] != "123" || m["e"] != "true" {
+		t.Fatalf("untagged: %v", m)
+	}
+	got, err := Encode(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "a: !s 123\nb: !s 3.10\nc: !s 0xFF\nd: !s Infinity\ne: true\n" {
+		t.Fatalf("re-encode: %q", got)
+	}
+}
+
+func TestExtremeParserLimits(t *testing.T) {
+	if doc, err := Decode(""); err != nil || len(doc.(map[string]any)) != 0 {
+		t.Fatal("empty")
+	}
+	if doc, err := Decode("\ufeffa: hello\n"); err != nil || doc.(map[string]any)["a"] != "hello" {
+		t.Fatal("BOM")
+	}
+	if _, err := Decode("a: ok\x00no\n"); err == nil {
+		t.Fatal("expected NUL error")
+	}
+	if _, err := Decode(strings.Repeat("x", 1024*1024+1)); err == nil {
+		t.Fatal("expected oversize error")
+	}
+	if _, err := Decode(nestSource(64)); err != nil {
+		t.Fatalf("depth 64: %v", err)
+	}
+	if _, err := Decode(nestSource(65)); err == nil {
+		t.Fatal("expected depth 65 error")
+	}
+	if doc, err := Decode("a: 123\r\nb: x\r\n"); err != nil || doc.(map[string]any)["a"] != "123" {
+		t.Fatal("CRLF")
+	}
+	if doc, err := Decode("a: !s 3.10\n"); err != nil || doc.(map[string]any)["a"] != "3.10" {
+		t.Fatal("explicit !s")
+	}
+}
+
+func TestExtremeEncoderLimits(t *testing.T) {
+	text, err := Encode(nestEncode(64))
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc, err := Decode(text)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cur := doc.(map[string]any)
+	for i := 0; i < 64; i++ {
+		cur = cur["c"].(map[string]any)
+	}
+	if cur["v"] != "leaf" {
+		t.Fatalf("leaf: %v", cur)
+	}
+	if _, err := Encode(nestEncode(65)); err == nil {
+		t.Fatal("expected encode depth 65 error")
+	}
+	if _, err := Encode(map[string]any{"": "x"}); err == nil {
+		t.Fatal("empty key")
+	}
+	if _, err := Encode(map[string]any{"a: b": "x"}); err == nil {
+		t.Fatal("colon key")
+	}
+	text, err = Encode(map[string]any{"8080": "8080", "3.10": "3.10"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(text, "8080: !s 8080") || !strings.Contains(text, "3.10: !s 3.10") {
+		t.Fatalf("numeric keys: %q", text)
 	}
 }

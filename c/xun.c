@@ -214,6 +214,8 @@ const xun_value *xun_dict_get(const xun_value *dict, const char *key) {
 static char *glyph_of(parser *p, xun_value *v, int line_no);
 static xun_value *apply_tag(parser *p, const char *tag, const char *glyph, int n);
 static xun_value *parse_value(parser *p, const char *raw, int parent_indent, int line_no, int depth);
+static char *parse_quoted_string(parser *p, const char *raw, int line_no);
+static char *parse_string_body(parser *p, const char *body, int line_no);
 static xun_value *parse_dict(parser *p, int indent, int depth);
 static xun_value *parse_list(parser *p, int indent, int depth, const char *item_tag);
 
@@ -584,7 +586,7 @@ static xun_value *parse_tagged(parser *p, const char *raw, int parent_indent, in
     if (strcmp(tag, "s") == 0) return res;
     return apply_tag(p, tag, res->u.str, line_no);
   }
-  if (strcmp(tag, "s") == 0) return vstr(p, body);
+  if (strcmp(tag, "s") == 0) return vstr(p, parse_string_body(p, body, line_no));
   return apply_tag(p, tag, body, line_no);
 }
 
@@ -595,6 +597,7 @@ static xun_value *parse_value(parser *p, const char *raw, int parent_indent, int
   if (closer) return read_multiline(p, parent_indent, NULL, closer, line_no);
   if (raw[0] == '!') return parse_tagged(p, raw, parent_indent, line_no, depth);
   if (!raw[0]) return parse_empty_or_nested(p, parent_indent, line_no, depth, NULL);
+  if (raw[0] == '"') return vstr(p, parse_quoted_string(p, raw, line_no));
   return vstr(p, raw);
 }
 
@@ -815,6 +818,149 @@ static const char *strip_surrounding_quotes(const char *s, size_t *out_len) {
   return s;
 }
 
+static int is_ascii_ws(char c) {
+  return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\v' || c == '\f';
+}
+
+/* Glyphs that JavaScript Number() would coerce. */
+static int looks_like_js_decimal(const char *s, size_t n) {
+  size_t i = 0;
+  int saw_digit = 0;
+  if (i < n && s[i] == '.') {
+    i++;
+    while (i < n && s[i] >= '0' && s[i] <= '9') {
+      saw_digit = 1;
+      i++;
+    }
+  } else {
+    while (i < n && s[i] >= '0' && s[i] <= '9') {
+      saw_digit = 1;
+      i++;
+    }
+    if (i < n && s[i] == '.') {
+      i++;
+      while (i < n && s[i] >= '0' && s[i] <= '9') i++;
+    }
+  }
+  if (!saw_digit) return 0;
+  if (i < n && (s[i] == 'e' || s[i] == 'E')) {
+    i++;
+    if (i < n && (s[i] == '+' || s[i] == '-')) i++;
+    size_t exp_start = i;
+    while (i < n && s[i] >= '0' && s[i] <= '9') i++;
+    if (i == exp_start) return 0;
+  }
+  return i == n;
+}
+
+static int looks_like_js_number(const char *s) {
+  while (*s && is_ascii_ws(*s)) s++;
+  size_t n = strlen(s);
+  while (n > 0 && is_ascii_ws(s[n - 1])) n--;
+  if (n == 0) return 0;
+  size_t i = 0;
+  if (s[0] == '+' || s[0] == '-') {
+    i = 1;
+    if (i >= n) return 0;
+  }
+  const char *rest = s + i;
+  size_t rn = n - i;
+  if (rn == 8 && memcmp(rest, "Infinity", 8) == 0) return 1;
+  if (rn >= 3 && rest[0] == '0' && (rest[1] == 'x' || rest[1] == 'X')) {
+    for (size_t k = 2; k < rn; k++) {
+      char c = rest[k];
+      if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'))) return 0;
+    }
+    return 1;
+  }
+  if (rn >= 3 && rest[0] == '0' && (rest[1] == 'b' || rest[1] == 'B')) {
+    for (size_t k = 2; k < rn; k++) {
+      if (rest[k] != '0' && rest[k] != '1') return 0;
+    }
+    return 1;
+  }
+  if (rn >= 3 && rest[0] == '0' && (rest[1] == 'o' || rest[1] == 'O')) {
+    for (size_t k = 2; k < rn; k++) {
+      if (rest[k] < '0' || rest[k] > '7') return 0;
+    }
+    return 1;
+  }
+  return looks_like_js_decimal(rest, rn);
+}
+
+static int needs_string_tag(const char *s) {
+  return s[0] == '!' || strcmp(s, "[]") == 0 || strcmp(s, "{}") == 0 || s[0] == '|' || looks_like_js_number(s);
+}
+
+static int needs_quoted_glyph(const char *s) {
+  const char *start = s;
+  const char *end = s + strlen(s);
+  while (start < end && is_ascii_ws(*start)) start++;
+  while (end > start && is_ascii_ws(end[-1])) end--;
+  return start > s || end < s + strlen(s) || strchr(s, '"') || strchr(s, '\\');
+}
+
+static void buf_append_quoted_glyph(str_buf *b, const char *s) {
+  buf_append_str(b, "\"");
+  for (const char *c = s; *c; c++) {
+    if (*c == '\\') buf_append_str(b, "\\\\");
+    else if (*c == '"') buf_append_str(b, "\\\"");
+    else {
+      char tmp[2] = {*c, 0};
+      buf_append_str(b, tmp);
+    }
+  }
+  buf_append_str(b, "\"");
+}
+
+static void buf_append_string_glyph(str_buf *b, const char *s) {
+  if (needs_string_tag(s)) buf_append_str(b, " !s ");
+  else buf_append_str(b, " ");
+  if (needs_quoted_glyph(s)) buf_append_quoted_glyph(b, s);
+  else buf_append_str(b, s);
+  buf_append_str(b, "\n");
+}
+
+static char *parse_quoted_string(parser *p, const char *raw, int line_no) {
+  if (raw[0] != '"') fail(p, line_no, "quoted string must start with '\"'");
+  str_buf out;
+  buf_init(&out);
+  for (size_t i = 1; raw[i]; i++) {
+    char ch = raw[i];
+    if (ch == '\\') {
+      if (!raw[i + 1]) fail(p, line_no, "unclosed escape in quoted string");
+      char nxt = raw[++i];
+      if (nxt == '\\' || nxt == '"') {
+        char tmp[2] = {nxt, 0};
+        buf_append_str(&out, tmp);
+      } else {
+        free(out.data);
+        fail(p, line_no, "invalid escape in quoted string");
+      }
+      continue;
+    }
+    if (ch == '"') {
+      if (raw[i + 1]) {
+        free(out.data);
+        fail(p, line_no, "unexpected trailing content after quoted string");
+      }
+      char *res = astrdup(p, out.data ? out.data : "");
+      free(out.data);
+      return res;
+    }
+    char tmp[2] = {ch, 0};
+    buf_append_str(&out, tmp);
+  }
+  free(out.data);
+  fail(p, line_no, "unclosed quoted string");
+  return NULL;
+}
+
+static char *parse_string_body(parser *p, const char *body, int line_no) {
+  if (body[0] == '"') return parse_quoted_string(p, body, line_no);
+  return astrdup(p, body);
+}
+
 static int validate_key_c(const char *key) {
   if (!key || !key[0]) return -1;
   if (strchr(key, '\n') || strchr(key, '\r') || strstr(key, ": ") || (key[0] && key[strlen(key) - 1] == ':')) {
@@ -882,15 +1028,7 @@ static int encode_dict_body(const xun_value *dict, int depth, str_buf *b) {
       } else if (!s[0]) {
         buf_append_str(b, "\n");
       } else {
-        if (s[0] == '!' || strcmp(s, "[]") == 0 || strcmp(s, "{}") == 0 || s[0] == '|') {
-          buf_append_str(b, " !s ");
-          buf_append_str(b, s);
-          buf_append_str(b, "\n");
-        } else {
-          buf_append_str(b, " ");
-          buf_append_str(b, s);
-          buf_append_str(b, "\n");
-        }
+        buf_append_string_glyph(b, s);
       }
       free(s);
     } else if (val->kind == XUN_INT) {
@@ -1007,15 +1145,7 @@ static int encode_value_node(const xun_value *v, int depth, str_buf *b) {
         } else if (!s[0]) {
           buf_append_str(b, "\n");
         } else {
-          if (s[0] == '!' || strcmp(s, "[]") == 0 || strcmp(s, "{}") == 0 || s[0] == '|') {
-            buf_append_str(b, " !s ");
-            buf_append_str(b, s);
-            buf_append_str(b, "\n");
-          } else {
-            buf_append_str(b, " ");
-            buf_append_str(b, s);
-            buf_append_str(b, "\n");
-          }
+          buf_append_string_glyph(b, s);
         }
         free(s);
       } else if (item->kind == XUN_INT) {

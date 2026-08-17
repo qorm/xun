@@ -587,6 +587,9 @@ impl Parser {
         if raw.is_empty() {
             return self.parse_empty_or_nested(parent_indent, line_no, depth, None);
         }
+        if raw.starts_with('"') {
+            return Ok(Value::String(parse_quoted_string(raw, line_no)?));
+        }
         Ok(Value::String(raw.to_string()))
     }
 
@@ -626,7 +629,7 @@ impl Parser {
             return apply_tag(&tag, &text, line_no);
         }
         if tag == "s" {
-            return Ok(Value::String(body.to_string()));
+            return Ok(Value::String(parse_string_body(body, line_no)?));
         }
         apply_tag(&tag, body, line_no)
     }
@@ -1199,6 +1202,161 @@ fn strip_surrounding_quotes(s: &str) -> &str {
     out
 }
 
+fn is_ascii_ws(c: u8) -> bool {
+    matches!(c, b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c)
+}
+
+/// Glyphs that JavaScript Number() would coerce.
+fn looks_like_js_number(s: &str) -> bool {
+    let b = s.as_bytes();
+    let mut start = 0;
+    let mut end = b.len();
+    while start < end && is_ascii_ws(b[start]) {
+        start += 1;
+    }
+    while end > start && is_ascii_ws(b[end - 1]) {
+        end -= 1;
+    }
+    if start >= end {
+        return false;
+    }
+    let t = &b[start..end];
+    let mut i = 0;
+    if t[0] == b'+' || t[0] == b'-' {
+        i = 1;
+        if i >= t.len() {
+            return false;
+        }
+    }
+    let rest = &t[i..];
+    if rest == b"Infinity" {
+        return true;
+    }
+    if rest.len() >= 3 && rest[0] == b'0' && (rest[1] == b'x' || rest[1] == b'X') {
+        return rest[2..].iter().all(|c| c.is_ascii_hexdigit());
+    }
+    if rest.len() >= 3 && rest[0] == b'0' && (rest[1] == b'b' || rest[1] == b'B') {
+        return rest[2..].iter().all(|c| *c == b'0' || *c == b'1');
+    }
+    if rest.len() >= 3 && rest[0] == b'0' && (rest[1] == b'o' || rest[1] == b'O') {
+        return rest[2..].iter().all(|c| (b'0'..=b'7').contains(c));
+    }
+    looks_like_js_decimal(rest)
+}
+
+fn looks_like_js_decimal(t: &[u8]) -> bool {
+    let n = t.len();
+    let mut i = 0;
+    let mut saw_digit = false;
+    if i < n && t[i] == b'.' {
+        i += 1;
+        while i < n && t[i].is_ascii_digit() {
+            saw_digit = true;
+            i += 1;
+        }
+    } else {
+        while i < n && t[i].is_ascii_digit() {
+            saw_digit = true;
+            i += 1;
+        }
+        if i < n && t[i] == b'.' {
+            i += 1;
+            while i < n && t[i].is_ascii_digit() {
+                i += 1;
+            }
+        }
+    }
+    if !saw_digit {
+        return false;
+    }
+    if i < n && (t[i] == b'e' || t[i] == b'E') {
+        i += 1;
+        if i < n && (t[i] == b'+' || t[i] == b'-') {
+            i += 1;
+        }
+        let exp_start = i;
+        while i < n && t[i].is_ascii_digit() {
+            i += 1;
+        }
+        if i == exp_start {
+            return false;
+        }
+    }
+    i == n
+}
+
+fn needs_string_tag(s: &str) -> bool {
+    s.starts_with('!') || s == "[]" || s == "{}" || s.starts_with('|') || looks_like_js_number(s)
+}
+
+fn parse_quoted_string(raw: &str, line_no: usize) -> Result<String, Error> {
+    if !raw.starts_with('"') {
+        return Err(err(line_no, "quoted string must start with '\"'"));
+    }
+    let mut out = String::new();
+    let bytes = raw.as_bytes();
+    let mut i = 1;
+    while i < bytes.len() {
+        let ch = bytes[i];
+        if ch == b'\\' {
+            if i + 1 >= bytes.len() {
+                return Err(err(line_no, "unclosed escape in quoted string"));
+            }
+            match bytes[i + 1] {
+                b'\\' | b'"' => {
+                    out.push(bytes[i + 1] as char);
+                    i += 2;
+                }
+                c => return Err(err(line_no, format!("invalid escape \\{} in quoted string", c as char))),
+            }
+            continue;
+        }
+        if ch == b'"' {
+            if i != bytes.len() - 1 {
+                return Err(err(line_no, "unexpected trailing content after quoted string"));
+            }
+            return Ok(out);
+        }
+        out.push(ch as char);
+        i += 1;
+    }
+    Err(err(line_no, "unclosed quoted string"))
+}
+
+fn needs_quoted_glyph(s: &str) -> bool {
+    s.trim() != s || s.contains('"') || s.contains('\\')
+}
+
+fn quote_glyph(s: &str) -> String {
+    let mut out = String::from('"');
+    for ch in s.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            _ => out.push(ch),
+        }
+    }
+    out.push('"');
+    out
+}
+
+fn encode_string_glyph(s: &str) -> String {
+    let body = if needs_quoted_glyph(s) { quote_glyph(s) } else { s.to_string() };
+    if needs_string_tag(s) {
+        format!("!s {body}")
+    } else {
+        body
+    }
+}
+
+fn parse_string_body(body: &str, line_no: usize) -> Result<String, Error> {
+    if body.starts_with('"') {
+        parse_quoted_string(body, line_no)
+    } else {
+        Ok(body.to_string())
+    }
+}
+
 fn encode_dict(pairs: &[(String, Value)], depth: usize, lines: &mut Vec<String>) -> Result<(), Error> {
     if depth > 64 {
         return Err(err(0, "nesting depth exceeds limit"));
@@ -1233,10 +1391,8 @@ fn encode_dict(pairs: &[(String, Value)], depth: usize, lines: &mut Vec<String>)
                     lines.push(format!("{indent}|"));
                 } else if s.is_empty() {
                     lines.push(format!("{indent}{k}:"));
-                } else if s.starts_with('!') || s == "[]" || s == "{}" || s.starts_with('|') {
-                    lines.push(format!("{indent}{k}: !s {s}"));
                 } else {
-                    lines.push(format!("{indent}{k}: {s}"));
+                    lines.push(format!("{indent}{k}: {}", encode_string_glyph(s)));
                 }
             }
             Value::Int(i) => {
@@ -1304,10 +1460,8 @@ fn encode_list(items: &[Value], depth: usize, lines: &mut Vec<String>) -> Result
                     lines.push(format!("{indent}|"));
                 } else if s.is_empty() {
                     lines.push(format!("{indent}-"));
-                } else if s.starts_with('!') || s == "[]" || s == "{}" || s.starts_with('|') {
-                    lines.push(format!("{indent}- !s {s}"));
                 } else {
-                    lines.push(format!("{indent}- {s}"));
+                    lines.push(format!("{indent}- {}", encode_string_glyph(s)));
                 }
             }
             Value::Int(i) => {
@@ -1433,10 +1587,39 @@ mod tests {
     }
 
     #[test]
+    fn encode_numeric_looking_strings_with_s_tag() {
+        let cases: Vec<(Value, &str)> = vec![
+            (Value::Dict(vec![("a".into(), Value::String("123".into()))]), "a: !s 123\n"),
+            (Value::Dict(vec![("a".into(), Value::String("3.10".into()))]), "a: !s 3.10\n"),
+            (Value::Dict(vec![("a".into(), Value::String("-1.5".into()))]), "a: !s -1.5\n"),
+            (Value::Dict(vec![("a".into(), Value::String("1e-3".into()))]), "a: !s 1e-3\n"),
+            (Value::Dict(vec![("a".into(), Value::String("0xFF".into()))]), "a: !s 0xFF\n"),
+            (Value::Dict(vec![("a".into(), Value::String("0b10".into()))]), "a: !s 0b10\n"),
+            (Value::Dict(vec![("a".into(), Value::String("0o755".into()))]), "a: !s 0o755\n"),
+            (Value::Dict(vec![("a".into(), Value::String("Infinity".into()))]), "a: !s Infinity\n"),
+            (Value::Dict(vec![("a".into(), Value::String("\"8080\"".into()))]), "a: !s 8080\n"),
+            (Value::Dict(vec![("items".into(), Value::List(vec![
+                Value::String("80".into()),
+                Value::String("443".into()),
+            ]))]), "items:\n  - !s 80\n  - !s 443\n"),
+            (Value::Dict(vec![("a".into(), Value::Int(123))]), "a: !i 123\n"),
+            (Value::Dict(vec![("a".into(), Value::String("hello".into()))]), "a: hello\n"),
+            (Value::Dict(vec![("a".into(), Value::String("123abc".into()))]), "a: 123abc\n"),
+            (Value::Dict(vec![("a".into(), Value::String("1.2.3".into()))]), "a: 1.2.3\n"),
+        ];
+        for (doc, want) in cases {
+            assert_eq!(encode(&doc).unwrap(), want);
+        }
+        let parsed = parse("a: 123\n").unwrap();
+        assert_eq!(parsed, Value::Dict(vec![("a".into(), Value::String("123".into()))]));
+        assert_eq!(encode(&parsed).unwrap(), "a: !s 123\n");
+    }
+
+    #[test]
     fn file_write_and_read() {
         let doc = Value::Dict(vec![
             ("app".into(), Value::String("rust-xun".into())),
-            ("version".into(), Value::Tagged(Tagged { tag: "ver".into(), value: "0.1.4".into() })),
+            ("version".into(), Value::Tagged(Tagged { tag: "ver".into(), value: "0.1.5".into() })),
             ("count".into(), Value::Int(100)),
             ("rate".into(), Value::Float(99.5)),
             ("enabled".into(), Value::Bool(true)),
@@ -1640,5 +1823,154 @@ char_cp: !c U+4E2D
         for src in cases {
             assert!(decode(src).is_err(), "should reject: {src:?}");
         }
+    }
+
+    const MUST_TAG: &[&str] = &[
+        "0", "00", "012", "08", "8080", "+123", "-123", "-0", "+0",
+        "3.10", "3.", ".5", ".0", "0.", "0.0", "00.1", "-.5", "+.5", "+0.0", "-0.0",
+        "1e3", "1E-3", "1e+10", "0e0", "1E+0", "1e-0", "+1.5e-10", "5.e2", "+.5e2", "-.5E-1",
+        "0xFF", "0Xff", "0x0", "0xabcdef", "0XABCDEF",
+        "0b10", "0B10", "0b0", "0b01",
+        "0o755", "0O7", "0o0", "0o07",
+        "Infinity", "+Infinity", "-Infinity",
+        "9007199254740991", "9007199254740993",
+        "-0x10", "+0x10", "-0b1", "+0b10", "-0o10",
+        " 123",
+    ];
+
+    const MUST_NOT_TAG: &[&str] = &[
+        "hello", "123abc", "abc123", "1.2.3", "3.1.0",
+        "1e", "1e+", "e3", "e10", "5.e", ".", "+", "-",
+        "0x", "0b", "0o", "0xg", "0xG", "0b2", "0o8", "0x10n", "123n",
+        "infinity", "INFINITY", "Inf", "NaN", "true", "false", "null",
+        "1_000", "1_2", "0xFF_AA", "127.0.0.1", "2026-08-14", "::1",
+    ];
+
+    fn nest_encode(levels: usize) -> Value {
+        let mut o = Value::Dict(vec![("v".into(), Value::String("leaf".into()))]);
+        for _ in 0..levels {
+            o = Value::Dict(vec![("c".into(), o)]);
+        }
+        o
+    }
+
+    fn nest_source(levels: usize) -> String {
+        let mut s = String::new();
+        for i in 0..levels {
+            s.push_str(&"  ".repeat(i));
+            s.push_str(&format!("k{i}:\n"));
+        }
+        s.push_str(&"  ".repeat(levels));
+        s.push_str("v: leaf\n");
+        s
+    }
+
+    fn dict_a(v: Value) -> Value {
+        Value::Dict(vec![("a".into(), v)])
+    }
+
+    #[test]
+    fn extreme_numeric_looking_strings() {
+        for s in MUST_TAG {
+            let quoted = s.trim() != *s || s.contains('"') || s.contains('\\');
+            let body = if quoted { quote_glyph(s) } else { s.to_string() };
+            let text = encode(&dict_a(Value::String((*s).into()))).unwrap();
+            assert_eq!(text, format!("a: !s {body}\n"), "encode {s:?}");
+            let parsed = parse(&text).unwrap();
+            assert_eq!(parsed, dict_a(Value::String((*s).into())));
+        }
+    }
+
+    #[test]
+    fn extreme_quoted_strings_preserve_spaces() {
+        assert_eq!(encode(&dict_a(Value::String("123 ".into()))).unwrap(), "a: !s \"123 \"\n");
+        assert_eq!(parse("a: \"123 \"\n").unwrap(), dict_a(Value::String("123 ".into())));
+        assert_eq!(parse("a: \"\"\n").unwrap(), dict_a(Value::String("".into())));
+        let round = parse("a: \"123 \"\n").unwrap();
+        assert_eq!(encode(&round).unwrap(), "a: !s \"123 \"\n");
+    }
+
+    #[test]
+    fn extreme_non_numeric_stay_untagged() {
+        for s in MUST_NOT_TAG {
+            let text = encode(&dict_a(Value::String((*s).into()))).unwrap();
+            assert_eq!(text, format!("a: {s}\n"), "encode {s:?}");
+        }
+    }
+
+    #[test]
+    fn extreme_specials_quotes_lists() {
+        assert_eq!(encode(&dict_a(Value::String("!x".into()))).unwrap(), "a: !s !x\n");
+        assert_eq!(encode(&dict_a(Value::String("[]".into()))).unwrap(), "a: !s []\n");
+        assert_eq!(encode(&dict_a(Value::String("{}".into()))).unwrap(), "a: !s {}\n");
+        assert_eq!(encode(&dict_a(Value::String("|foo".into()))).unwrap(), "a: !s |foo\n");
+        assert_eq!(encode(&dict_a(Value::Int(123))).unwrap(), "a: !i 123\n");
+        assert_eq!(encode(&dict_a(Value::Float(3.14))).unwrap(), "a: !f 3.14\n");
+        assert_eq!(encode(&dict_a(Value::Bool(true))).unwrap(), "a: !b true\n");
+        let data = Value::Dict(vec![
+            ("ports".into(), Value::List(vec![
+                Value::String("80".into()),
+                Value::String("443".into()),
+                Value::String("8080".into()),
+            ])),
+            ("mixed".into(), Value::List(vec![
+                Value::String("1".into()),
+                Value::Int(1),
+                Value::String("x".into()),
+            ])),
+        ]);
+        let text = encode(&data).unwrap();
+        let parsed = parse(&text).unwrap();
+        assert_eq!(parsed, data);
+    }
+
+    #[test]
+    fn extreme_untagged_reencode() {
+        let parsed = parse("a: 123\nb: 3.10\nc: 0xFF\nd: Infinity\ne: true\n").unwrap();
+        assert_eq!(
+            encode(&parsed).unwrap(),
+            "a: !s 123\nb: !s 3.10\nc: !s 0xFF\nd: !s Infinity\ne: true\n"
+        );
+    }
+
+    #[test]
+    fn extreme_parser_limits() {
+        assert_eq!(parse("").unwrap(), Value::Dict(vec![]));
+        assert_eq!(
+            dict_get(&parse("\u{feff}a: hello\n").unwrap(), "a"),
+            Some(&Value::String("hello".into()))
+        );
+        assert!(parse("a: ok\0no\n").is_err());
+        assert!(parse(&"x".repeat(1024 * 1024 + 1)).is_err());
+        assert!(parse(&nest_source(64)).is_ok());
+        assert!(parse(&nest_source(65)).is_err());
+        assert_eq!(
+            dict_get(&parse("a: 123\r\nb: x\r\n").unwrap(), "a"),
+            Some(&Value::String("123".into()))
+        );
+        assert_eq!(
+            dict_get(&parse("a: !s 3.10\n").unwrap(), "a"),
+            Some(&Value::String("3.10".into()))
+        );
+    }
+
+    #[test]
+    fn extreme_encoder_limits() {
+        let text = encode(&nest_encode(64)).unwrap();
+        let mut cur = parse(&text).unwrap();
+        for _ in 0..64 {
+            cur = dict_get(&cur, "c").unwrap().clone();
+        }
+        assert_eq!(dict_get(&cur, "v"), Some(&Value::String("leaf".into())));
+        assert!(encode(&nest_encode(65)).is_err());
+        assert!(encode(&Value::Dict(vec![("".into(), Value::String("x".into()))])).is_err());
+        assert!(encode(&Value::Dict(vec![("a: b".into(), Value::String("x".into()))])).is_err());
+        let text = encode(&Value::Dict(vec![
+            ("8080".into(), Value::String("8080".into())),
+            ("3.10".into(), Value::String("3.10".into())),
+        ]))
+        .unwrap();
+        assert!(text.contains("8080: !s 8080"));
+        assert!(text.contains("3.10: !s 3.10"));
     }
 }

@@ -37,7 +37,7 @@ cd editors/vscode
 # 使用 vsce 打包
 npx -y @vscode/vsce package
 # 安装到 VS Code
-code --install-extension vscode-xun-0.1.4.vsix
+code --install-extension vscode-xun-0.1.5.vsix
 ```
 
 ---
