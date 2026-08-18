@@ -5,7 +5,7 @@
 XUN (pronounced “shün”, like Chinese 讯) is a modern configuration notation designed for human readability and unambiguous machine parsing: **unquoted by default**, **types explicitly tagged (`!tag`)**, and **strict 2-space indentation per level**. The name stands for **X Unquoted Notation**.
 
 - File extension: `.xun`
-- Media type: `text/xun`
+- Media type: `application/xun` (compatibility alias: `text/xun`)
 - Language identifier: `xun`
 
 Compared with JSON: eliminates repetitive quotes, supports comments, and provides clean native multiline blocks.  
