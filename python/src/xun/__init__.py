@@ -127,6 +127,28 @@ class Tagged:
             return base64.b64decode(re.sub(r"\s+", "", self.value))
         raise XunError(f"cannot convert !{self.tag} to raw bytes")
 
+    def to_number(self) -> int | float:
+        if self.tag == "o":
+            if not re.fullmatch(r"[0-7]+", self.value):
+                raise XunError(f"invalid octal: {self.value}")
+            return int(self.value, 8)
+        if self.tag == "x":
+            s = self.value.replace("_", "")
+            if not re.fullmatch(r"[0-9A-Fa-f]+", s):
+                raise XunError(f"invalid hex: {self.value}")
+            return int(s, 16)
+        if self.tag == "unix":
+            return _parse_unix(self.value, 0, "")
+        if self.tag in {"n", "i", "f"}:
+            s = self.value.replace("_", "")
+            if re.fullmatch(r"[+-]?\d+", s):
+                return int(s)
+            try:
+                return float(s)
+            except ValueError as e:
+                raise XunError(f"invalid number: {self.value}") from e
+        raise XunError(f"cannot convert !{self.tag} to number")
+
 
 def parse_size(s: str) -> int:
     units = {
@@ -152,14 +174,15 @@ def parse_size(s: str) -> int:
 def parse_duration(s: str) -> float:
     if not s:
         raise XunError("empty duration string")
-    m = re.fullmatch(r"(?:(\d+)d)?(?:(\d+)h)?(?:(\d+)m)?(?:(\d+(?:\.\d+)?)s)?", s)
+    m = re.fullmatch(r"(?:(\d+)d)?(?:(\d+)h)?(?:(\d+)m)?(?:(\d+(?:\.\d+)?)s)?(?:(\d+(?:\.\d+)?)ms)?", s)
     if not m or not any(m.groups()):
         raise XunError(f"invalid duration format: {s!r}")
     days = int(m.group(1) or 0)
     hours = int(m.group(2) or 0)
     minutes = int(m.group(3) or 0)
     seconds = float(m.group(4) or 0)
-    return days * 86400.0 + hours * 3600.0 + minutes * 60.0 + seconds
+    millis = float(m.group(5) or 0)
+    return days * 86400.0 + hours * 3600.0 + minutes * 60.0 + seconds + millis / 1000.0
 
 
 def parse_version(s: str) -> tuple[int, ...]:
@@ -193,6 +216,8 @@ def unpack(v: Any) -> Any:
             return v.to_char()
         if v.tag == "tz":
             return v.to_timezone()
+        if v.tag in {"o", "x", "unix"}:
+            return v.to_number()
         return v.value
     if isinstance(v, dict):
         return {k: unpack(val) for k, val in v.items()}
@@ -226,8 +251,33 @@ class Line:
     raw: str
     indent: int
     text: str
+    code: str
     n: int
     blank: bool
+
+
+def _strip_trailing_comment(text: str) -> str:
+    """Strip a trailing ` # ...` comment outside of quoted strings."""
+    in_quote = False
+    i = 0
+    while i < len(text):
+        ch = text[i]
+        if in_quote:
+            if ch == "\\":
+                i += 2
+                continue
+            if ch == '"':
+                in_quote = False
+            i += 1
+            continue
+        if ch == '"':
+            in_quote = True
+            i += 1
+            continue
+        if ch == "#" and (i == 0 or text[i - 1] in " \t"):
+            return text[:i].rstrip(" \t")
+        i += 1
+    return text
 
 
 def _split_lines(source: str) -> list[Line]:
@@ -262,13 +312,16 @@ def _make_line(raw: str, n: int) -> Line:
     if i % 2 != 0:
         raise XunError(f"indent must be a multiple of 2, got {i} spaces", line=n, column=i + 1, source_line=raw)
     text = raw[i:].rstrip(" \t")
-    return Line(raw, i, text, n, len(text) == 0)
+    code = _strip_trailing_comment(text)
+    return Line(raw, i, text, code, n, len(text) == 0)
 
 
 class Parser:
     def __init__(self, lines: list[Line]) -> None:
         self.lines = lines
         self.i = 0
+        # RFC-0001: stack of (indent, expected_key) for 'end' validation.
+        self.open_blocks: list[tuple[int, str | None]] = []
 
     def peek(self) -> Line | None:
         return self.lines[self.i] if self.i < len(self.lines) else None
@@ -277,10 +330,34 @@ class Parser:
         while self.peek():
             l = self.peek()
             assert l is not None
-            if l.blank or l.text.startswith("#"):
+            if l.blank or len(l.code) == 0:
                 self.i += 1
             else:
                 break
+
+    # RFC-0001: try to consume an 'end' or 'end <key>' statement at given indent.
+    # Returns True if consumed, False if not an end statement.
+    # Raises XunError on key mismatch.
+    def try_consume_end(self, indent: int, expected_key: str | None) -> bool:
+        l = self.peek()
+        if not l or l.blank or l.indent != indent:
+            return False
+        code = l.code
+        if code == "end":
+            self.i += 1
+            return True
+        m = re.match(r"^end\s+(\S+)$", code)
+        if m:
+            end_key = m.group(1)
+            if expected_key is not None and expected_key != end_key:
+                raise XunError(
+                    f"end-key mismatch: expected '{expected_key}', got '{end_key}'",
+                    line=l.n,
+                    source_line=l.raw,
+                )
+            self.i += 1
+            return True
+        return False
 
     def parse_document(self) -> Any:
         self.skip_noise()
@@ -292,9 +369,17 @@ class Parser:
             raise XunError("document must start at indent 0", line=first.n, source_line=first.raw)
         if self.is_list_item(first):
             raise XunError("root must be a dictionary", line=first.n, source_line=first.raw)
-        return self.parse_dict(0, 0)
+        # RFC-0001: track root block so trailing 'end' can close it.
+        self.open_blocks.append((0, None))
+        try:
+            obj = self.parse_dict(0, 0, None)
+            self.skip_noise()
+            self.try_consume_end(0, None)
+            return obj
+        finally:
+            self.open_blocks.pop()
 
-    def parse_dict(self, indent: int, depth: int) -> dict[str, Any]:
+    def parse_dict(self, indent: int, depth: int, dict_key: str | None = None) -> dict[str, Any]:
         if depth > MAX_DEPTH:
             raise XunError("nesting depth exceeds limit of 64", line=self.peek().n if self.peek() else 0)
         obj: dict[str, Any] = {}
@@ -307,16 +392,21 @@ class Parser:
                 break
             if l.indent > indent:
                 raise XunError(f"invalid indent jump from {indent} to {l.indent}", line=l.n, source_line=l.raw)
+            # RFC-0001: 'end' at body indent stops the dict (caller validates via try_consume_end).
+            if l.code == "end" or l.code.startswith("end "):
+                break
             if self.is_list_item(l):
                 raise XunError("cannot mix list items into a dictionary", line=l.n, source_line=l.raw)
-            key, rest = _split_key(l.text, l.n, l.raw)
+            key, rest = _split_key(l.code, l.n, l.raw)
             if key in obj:
                 raise XunError(f"duplicate key '{key}' in dictionary", line=l.n, source_line=l.raw)
             self.i += 1
-            obj[key] = self.parse_value(rest, indent, l.n, l.raw, depth + 1)
+            obj[key] = self.parse_value(rest, indent, l.n, l.raw, depth + 1, key)
         return obj
 
-    def parse_list(self, indent: int, depth: int, item_tag: str | None = None) -> list[Any]:
+    def parse_list(
+        self, indent: int, depth: int, item_tag: str | None = None, parent_key: str | None = None
+    ) -> list[Any]:
         if depth > MAX_DEPTH:
             raise XunError("nesting depth exceeds limit of 64", line=self.peek().n if self.peek() else 0)
         arr: list[Any] = []
@@ -329,20 +419,69 @@ class Parser:
                 break
             if l.indent > indent:
                 raise XunError(f"invalid indent jump from {indent} to {l.indent}", line=l.n, source_line=l.raw)
+            # RFC-0001: 'end' at list level stops the list.
+            if l.code == "end" or l.code.startswith("end "):
+                break
             if not self.is_list_item(l):
                 raise XunError("cannot mix dictionary keys into a list", line=l.n, source_line=l.raw)
-            rest = "" if l.text == "-" else l.text[2:]
+            rest = "" if l.code == "-" else l.code[2:]
             self.i += 1
+            if _looks_like_dict_entry(rest):
+                if item_tag:
+                    raise XunError(f"!{item_tag}[] cannot contain dictionary entries", line=l.n, source_line=l.raw)
+                # RFC-0002: inline object literal {key: value, ...} as a list item.
+                if rest.strip().startswith("{"):
+                    arr.append(_parse_inline_dict(rest, l.n, l.raw))
+                    continue
+                arr.append(self.parse_inline_dict_entry(rest, indent + 2, l.n, l.raw, depth + 1))
+                continue
             val = self.parse_value(rest, indent, l.n, l.raw, depth + 1)
             if item_tag:
                 val = apply_tag(item_tag, glyph_of(val), l.n, l.raw)
             arr.append(val)
         return arr
 
-    def is_list_item(self, l: Line) -> bool:
-        return l.text == "-" or l.text.startswith("- ")
+    def parse_inline_dict_entry(
+        self, first: str, key_indent: int, line_no: int, source_line: str, depth: int
+    ) -> dict[str, Any]:
+        obj: dict[str, Any] = {}
+        key, rest = _split_key(first, line_no, source_line)
+        if key in obj:
+            raise XunError(f"duplicate key '{key}' in dictionary", line=line_no, source_line=source_line)
+        obj[key] = self.parse_value(rest, key_indent, line_no, source_line, depth + 1, key)
+        while self.peek():
+            self.skip_noise()
+            l = self.peek()
+            if not l or l.blank:
+                break
+            if l.indent < key_indent:
+                break
+            if l.indent > key_indent:
+                raise XunError(
+                    f"invalid indent jump from {key_indent} to {l.indent}", line=l.n, source_line=l.raw
+                )
+            if self.is_list_item(l):
+                break
+            key, rest = _split_key(l.text, l.n, l.raw)
+            if key in obj:
+                raise XunError(f"duplicate key '{key}' in dictionary", line=l.n, source_line=l.raw)
+            self.i += 1
+            obj[key] = self.parse_value(rest, key_indent, l.n, l.raw, depth + 1, key)
+        return obj
 
-    def parse_value(self, raw: str, parent_indent: int, line_no: int, source_line: str, depth: int) -> Any:
+    def is_list_item(self, l: Line) -> bool:
+        return l.code == "-" or l.code.startswith("- ")
+
+    def parse_value(
+        self,
+        raw: str,
+        parent_indent: int,
+        line_no: int,
+        source_line: str,
+        depth: int,
+        value_key: str | None = None,
+    ) -> Any:
+        raw = _strip_trailing_comment(raw)
         if raw == "[]":
             return []
         if raw == "{}":
@@ -351,14 +490,43 @@ class Parser:
         if ml:
             return self.read_multiline(parent_indent, ml[0], ml[1], line_no, source_line)
         if raw.startswith("!"):
-            return self.parse_tagged(raw, parent_indent, line_no, source_line, depth)
+            return self.parse_tagged(raw, parent_indent, line_no, source_line, depth, value_key)
+        # RFC-0002: untagged compact array of inline objects: [{...}, {...}]
+        if raw.startswith("[") and raw.endswith("]") and raw != "[]":
+            inner = raw[1:-1]
+            pieces = _split_top_level_commas(inner, line_no, source_line)
+            if any(p.strip().startswith("{") for p in pieces):
+                result: list[Any] = []
+                for piece in pieces:
+                    t = piece.strip()
+                    if t.startswith("{"):
+                        result.append(_parse_inline_dict(t, line_no, source_line))
+                    else:
+                        result.append(t)
+                return result
         if raw == "":
-            return self.parse_empty_or_nested(parent_indent, line_no, source_line, depth, None)
+            # RFC-0001: nested block — header at parent_indent, named value_key.
+            self.open_blocks.append((parent_indent, value_key))
+            try:
+                result = self.parse_empty_or_nested(parent_indent, line_no, source_line, depth, None, value_key)
+                self.skip_noise()
+                self.try_consume_end(parent_indent, value_key)
+                return result
+            finally:
+                self.open_blocks.pop()
         if raw.startswith('"'):
             return _parse_quoted_string(raw, line_no, source_line)
         return raw
 
-    def parse_tagged(self, raw: str, parent_indent: int, line_no: int, source_line: str, depth: int) -> Any:
+    def parse_tagged(
+        self,
+        raw: str,
+        parent_indent: int,
+        line_no: int,
+        source_line: str,
+        depth: int,
+        value_key: str | None = None,
+    ) -> Any:
         m = re.match(r"^!([A-Za-z_][A-Za-z0-9_]*)(.*)$", raw)
         if not m:
             raise XunError("invalid type tag format", line=line_no, source_line=source_line)
@@ -370,7 +538,26 @@ class Parser:
                 raise XunError("unclosed compact array bracket", line=line_no, source_line=source_line)
             inner = rest[1:-1]
             if inner == "":
-                return self.parse_empty_or_nested(parent_indent, line_no, source_line, depth, tag)
+                # RFC-0001: track tagged block for 'end' validation.
+                self.open_blocks.append((parent_indent, value_key))
+                try:
+                    result = self.parse_empty_or_nested(parent_indent, line_no, source_line, depth, tag, value_key)
+                    self.skip_noise()
+                    self.try_consume_end(parent_indent, value_key)
+                    return result
+                finally:
+                    self.open_blocks.pop()
+            # RFC-0002: detect inline object elements {key: val, ...} within compact arrays.
+            pieces = _split_top_level_commas(inner, line_no, source_line)
+            if any(p.strip().startswith("{") for p in pieces):
+                result2: list[Any] = []
+                for piece in pieces:
+                    t = piece.strip()
+                    if t.startswith("{"):
+                        result2.append(_parse_inline_dict(t, line_no, source_line))
+                    else:
+                        result2.append(apply_tag(tag, t, line_no, source_line))
+                return result2
             return [apply_tag(tag, g, line_no, source_line) for g in _split_compact(inner)]
         if rest == "":
             raise XunError(f"missing value for !{tag}", line=line_no, source_line=source_line)
@@ -386,7 +573,13 @@ class Parser:
         return apply_tag(tag, body, line_no, source_line)
 
     def parse_empty_or_nested(
-        self, parent_indent: int, line_no: int, source_line: str, depth: int, item_tag: str | None
+        self,
+        parent_indent: int,
+        line_no: int,
+        source_line: str,
+        depth: int,
+        item_tag: str | None,
+        value_key: str | None = None,
     ) -> Any:
         self.skip_noise()
         n = self.peek()
@@ -396,12 +589,12 @@ class Parser:
         if n.indent != child:
             raise XunError(f"child indent must be parent + 2 ({child}), got {n.indent}", line=n.n, source_line=n.raw)
         if self.is_list_item(n):
-            return self.parse_list(child, depth, item_tag)
+            return self.parse_list(child, depth, item_tag, value_key)
         if item_tag:
             raise XunError(f"!{item_tag}[] expected list items starting with '-'", line=n.n, source_line=n.raw)
-        return self.parse_dict(child, depth)
+        return self.parse_dict(child, depth, value_key)
 
-    def read_multiline(self, parent_indent: int, tag: str | None, closer: str, line_no: int, source_line: str) -> Any:
+    def read_multiline(self, parent_indent: int, closer: str, chomp: str, line_no: int, source_line: str) -> str:
         base = parent_indent + 2
         parts: list[str] = []
         while self.peek():
@@ -410,11 +603,14 @@ class Parser:
             stripped = l.raw.rstrip(" \t")
             content = stripped.lstrip(" ")
             ind = len(l.raw) - len(l.raw.lstrip(" "))
-            if not l.blank and ind == parent_indent and content == closer:
+            closer_text = _strip_trailing_comment(content)
+            if not l.blank and ind == parent_indent and closer_text == closer:
                 self.i += 1
                 s = "\n".join(parts)
-                if tag and tag != "s":
-                    return apply_tag(tag, s, line_no, source_line)
+                if chomp == "strip":
+                    s = s.rstrip("\n")
+                elif chomp == "clip" and s and not s.endswith("\n"):
+                    s += "\n"
                 return s
             if l.blank:
                 parts.append("")
@@ -429,22 +625,232 @@ class Parser:
         raise XunError(f"unclosed multiline block (expected '{closer}' at indent {parent_indent})", line=line_no, source_line=source_line)
 
 
+def _parse_quoted_prefix(raw: str, line_no: int, source_line: str = "") -> tuple[str, int]:
+    if not raw.startswith('"'):
+        raise XunError("quoted string must start with '\"'", line=line_no, source_line=source_line)
+    out: list[str] = []
+    i = 1
+    while i < len(raw):
+        ch = raw[i]
+        if ch == "\\":
+            if i + 1 >= len(raw):
+                raise XunError("unclosed escape in quoted string", line=line_no, source_line=source_line)
+            nxt = raw[i + 1]
+            if nxt in ("\\", '"'):
+                out.append(nxt)
+                i += 2
+                continue
+            raise XunError(f"invalid escape \\{nxt} in quoted string", line=line_no, source_line=source_line)
+        if ch == '"':
+            return "".join(out), i + 1
+        out.append(ch)
+        i += 1
+    raise XunError("unclosed quoted string", line=line_no, source_line=source_line)
+
+
 def _split_key(text: str, n: int, source_line: str) -> tuple[str, str]:
+    if text.startswith('"'):
+        key, end = _parse_quoted_prefix(text, n, source_line)
+        after = text[end:]
+        if after == ":":
+            return key, ""
+        if after.startswith(": "):
+            return key, after[2:]
+        raise XunError("expected ': ' or trailing ':' after quoted key", line=n, source_line=source_line)
     idx = text.find(": ")
     if idx > 0:
-        return text[:idx], text[idx + 2 :]
+        key = text[:idx]
+        if key.endswith(":"):
+            raise XunError(f"key must not end with ':': '{key}'", line=n, source_line=source_line)
+        return key, text[idx + 2 :]
     if text.endswith(":") and len(text) > 1:
-        return text[:-1], ""
+        key = text[:-1]
+        if key.endswith(":"):
+            raise XunError(f"key must not end with ':': '{key}'", line=n, source_line=source_line)
+        return key, ""
     raise XunError("expected ': ' or trailing ':' for key-value pair", line=n, source_line=source_line)
 
 
-def _match_multiline(raw: str) -> tuple[str | None, str] | None:
+def _match_multiline(raw: str) -> tuple[str, str] | None:
+    """Return (closer, chomp) when raw opens a multiline block, else None."""
     if raw == "|":
-        return None, "|"
-    m = re.match(r"^\|([A-Za-z_][A-Za-z0-9_]*)$", raw)
+        return "|", "exact"
+    if raw == "|-":
+        return "|", "strip"
+    if raw == "|+":
+        return "|", "clip"
+    m = re.match(r"^\|([A-Za-z_][A-Za-z0-9_]*)([-+]?)$", raw)
     if m:
-        return None, m.group(1)
+        chomp = "strip" if m.group(2) == "-" else "clip" if m.group(2) == "+" else "exact"
+        return m.group(1), chomp
     return None
+
+
+def _looks_like_dict_entry(s: str) -> bool:
+    if not s or s.startswith("!") or s.startswith('"') or s.startswith("|"):
+        return False
+    # RFC-0002: inline object literal {key: val, ...} counts as a dict entry.
+    if s.startswith("{"):
+        return True
+    return ": " in s or (s.endswith(":") and len(s) > 1)
+
+
+# RFC-0002: split a string by top-level commas, respecting brace and quote nesting.
+def _split_top_level_commas(inner: str, line_no: int, source_line: str) -> list[str]:
+    out: list[str] = []
+    start = 0
+    brace = 0
+    bracket = 0
+    in_quote = False
+    escape = False
+    i = 0
+    while i < len(inner):
+        ch = inner[i]
+        if escape:
+            escape = False
+            i += 1
+            continue
+        if in_quote:
+            if ch == "\\":
+                escape = True
+                i += 1
+                continue
+            if ch == '"':
+                in_quote = False
+            i += 1
+            continue
+        if ch == '"':
+            in_quote = True
+            i += 1
+            continue
+        if ch == "{":
+            brace += 1
+            i += 1
+            continue
+        if ch == "}":
+            brace -= 1
+            i += 1
+            continue
+        if ch == "[":
+            bracket += 1
+            i += 1
+            continue
+        if ch == "]":
+            bracket -= 1
+            i += 1
+            continue
+        if ch == "," and brace == 0 and bracket == 0:
+            out.append(inner[start:i])
+            start = i + 1
+        i += 1
+    last = inner[start:]
+    if last.strip():
+        out.append(last)
+    return out
+
+
+# RFC-0002: parse inline object literal {key: value, key2: value2}.
+def _parse_inline_dict(text: str, line_no: int, source_line: str) -> dict[str, Any]:
+    trimmed = text.strip()
+    if not trimmed.startswith("{") or not trimmed.endswith("}"):
+        raise XunError(
+            "inline object must be wrapped in '{...}'", line=line_no, source_line=source_line
+        )
+    inner = trimmed[1:-1]
+    if inner.strip() == "":
+        return {}
+    pieces = _split_top_level_commas(inner, line_no, source_line)
+    obj: dict[str, Any] = {}
+    for piece in pieces:
+        t = piece.strip()
+        if not t:
+            continue
+        # Find top-level key separator ": " (or trailing ":" at end).
+        in_quote = False
+        escape = False
+        found_idx = -1
+        for idx, c in enumerate(t):
+            if escape:
+                escape = False
+                continue
+            if in_quote:
+                if c == "\\":
+                    escape = True
+                    continue
+                if c == '"':
+                    in_quote = False
+                continue
+            if c == '"':
+                in_quote = True
+                continue
+            if c == ":":
+                # Trailing ":" separator (key with no value).
+                if idx == len(t) - 1:
+                    found_idx = idx
+                    break
+                # ": " separator (key: value) — require the next char to be a space.
+                if idx + 1 < len(t) and t[idx + 1] == " ":
+                    found_idx = idx
+                    break
+        if found_idx == -1:
+            raise XunError(
+                f"inline object entry missing ': ' separator: '{t}'",
+                line=line_no,
+                source_line=source_line,
+            )
+        key_raw = t[:found_idx].strip()
+        rest = t[found_idx + 1:].strip()
+        if key_raw.startswith('"'):
+            key, end = _parse_quoted_prefix(key_raw, line_no, source_line)
+            key_raw = key
+        if not key_raw:
+            raise XunError("empty key in inline object", line=line_no, source_line=source_line)
+        if key_raw in obj:
+            raise XunError(f"duplicate key '{key_raw}'", line=line_no, source_line=source_line)
+        value: Any
+        if rest == "":
+            value = ""
+        elif rest.startswith('"'):
+            value = _parse_quoted_string(rest, line_no, source_line)
+        elif rest.startswith("!"):
+            tm = re.match(r"^!([A-Za-z_][A-Za-z0-9_]*)(.*)$", rest)
+            if not tm:
+                raise XunError(
+                    f"invalid tag in inline object: '{rest}'", line=line_no, source_line=source_line
+                )
+            tag = tm.group(1)
+            tail = tm.group(2)
+            if tail == "":
+                raise XunError(
+                    f"missing value for !{tag}", line=line_no, source_line=source_line
+                )
+            if tail.startswith(" "):
+                value = apply_tag(tag, tail[1:], line_no, source_line)
+            elif tail.startswith("["):
+                if not tail.endswith("]"):
+                    raise XunError(
+                        "unclosed compact array in inline object",
+                        line=line_no,
+                        source_line=source_line,
+                    )
+                compact_inner = tail[1:-1]
+                if compact_inner == "":
+                    value = []
+                else:
+                    value = [
+                        apply_tag(tag, g, line_no, source_line)
+                        for g in _split_compact(compact_inner)
+                    ]
+            else:
+                raise XunError(
+                    "expected space or '[' after type tag in inline object",
+                    line=line_no,
+                    source_line=source_line,
+                )
+        else:
+            value = rest
+        obj[key_raw] = value
+    return obj
 
 
 def glyph_of(v: Any) -> str:
@@ -482,7 +888,7 @@ def apply_tag(tag: str, glyph: str, n: int, source_line: str = "") -> Any:
         s = _strip_underscores(glyph, n, source_line)
         if not re.fullmatch(r"[0-9A-Fa-f]+", s):
             raise XunError("invalid hex", line=n, source_line=source_line)
-        return int(s, 16)
+        return Tagged("x", glyph)
     if tag == "xb":
         s = glyph.replace("_", "")
         if not re.fullmatch(r"[0-9A-Fa-f]*", s) or len(s) % 2 or not s:
@@ -491,7 +897,7 @@ def apply_tag(tag: str, glyph: str, n: int, source_line: str = "") -> Any:
     if tag == "o":
         if not re.fullmatch(r"[0-7]+", glyph):
             raise XunError("invalid octal format", line=n, source_line=source_line)
-        return int(glyph, 8)
+        return Tagged("o", glyph)
     if tag == "b":
         if glyph == "true":
             return True
@@ -515,15 +921,16 @@ def apply_tag(tag: str, glyph: str, n: int, source_line: str = "") -> Any:
             raise XunError("invalid time zone name or offset", line=n, source_line=source_line)
         return Tagged("tz", glyph)
     if tag == "du":
-        if not glyph or not re.fullmatch(r"(\d+d)?(\d+h)?(\d+m)?(\d+(\.\d+)?s)?", glyph):
-            raise XunError("invalid duration format (e.g. 1d2h30m)", line=n, source_line=source_line)
+        if not glyph or not re.fullmatch(r"(\d+d)?(\d+h)?(\d+m)?(\d+(\.\d+)?s)?(\d+(\.\d+)?ms)?", glyph):
+            raise XunError("invalid duration format (e.g. 1d2h30m, 500ms)", line=n, source_line=source_line)
         return Tagged("du", glyph)
     if tag == "sz":
         if not re.fullmatch(r"\d+(\.\d+)?(B|KB|MB|GB|TB|PB|KiB|MiB|GiB|TiB|PiB)", glyph):
             raise XunError("invalid data size format (e.g. 10MiB, 3KB)", line=n, source_line=source_line)
         return Tagged("sz", glyph)
     if tag == "unix":
-        return _parse_unix(glyph, n, source_line)
+        _parse_unix(glyph, n, source_line)
+        return Tagged("unix", glyph)
     if tag == "ver":
         if not re.fullmatch(r"\d+(\.\d+)*", glyph):
             raise XunError("invalid version format, expected segment-separated numbers (e.g. 3.10)", line=n, source_line=source_line)
@@ -711,12 +1118,6 @@ def _tz_glyph(v: datetime.tzinfo) -> str:
     return f"{sign}{total_minutes // 60:02d}:{total_minutes % 60:02d}"
 
 
-def _strip_quotes(s: str) -> str:
-    while len(s) >= 2 and s[0] == '"' and s[-1] == '"':
-        s = s[1:-1]
-    return s
-
-
 # Glyphs that JavaScript Number() would coerce, plus syntactic specials.
 _LOOKS_LIKE_JS_NUMBER = re.compile(
     r"^[ \t\n\r\f\v]*[+-]?(?:Infinity|0[xX][0-9a-fA-F]+|0[bB][01]+|0[oO][0-7]+|(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?)[ \t\n\r\f\v]*$"
@@ -753,7 +1154,17 @@ def _parse_quoted_string(raw: str, line_no: int, source_line: str = "") -> str:
 
 
 def _needs_quoted_glyph(s: str) -> bool:
-    return s != s.strip() or '"' in s or "\\" in s
+    return (
+        s != s.strip()
+        or '"' in s
+        or "\\" in s
+        or " #" in s
+        or s.startswith("#")
+        or ": " in s
+        or (s.endswith(":") and len(s) > 1)
+        or s == "|"
+        or s.startswith("|")
+    )
 
 
 def _quote_glyph(s: str) -> str:
@@ -784,10 +1195,9 @@ def _encode_scalar_field(indent: str, key: str, v: Any, out: list[str], path: st
     if v is None:
         out.append(f"{indent}{key}:")
     elif isinstance(v, str):
-        v = _strip_quotes(v)
         if "\n" in v or "\r" in v:
             out.append(f"{indent}{key}: |")
-            for line in v.splitlines():
+            for line in re.split(r"\r?\n", v):
                 out.append(f"{indent}  {line}")
             out.append(f"{indent}|")
         elif v == "":
@@ -824,7 +1234,7 @@ def _encode_scalar_field(indent: str, key: str, v: Any, out: list[str], path: st
     elif isinstance(v, Tagged):
         if "\n" in v.value or "\r" in v.value:
             out.append(f"{indent}{key}: !{v.tag} |")
-            for line in v.value.splitlines():
+            for line in re.split(r"\r?\n", v.value):
                 out.append(f"{indent}  {line}")
             out.append(f"{indent}|")
         else:
@@ -837,10 +1247,9 @@ def _encode_scalar_list_item(indent: str, v: Any, out: list[str], path: str) -> 
     if v is None:
         out.append(f"{indent}-")
     elif isinstance(v, str):
-        v = _strip_quotes(v)
         if "\n" in v or "\r" in v:
             out.append(f"{indent}- |")
-            for line in v.splitlines():
+            for line in re.split(r"\r?\n", v):
                 out.append(f"{indent}  {line}")
             out.append(f"{indent}|")
         elif v == "":
@@ -876,7 +1285,7 @@ def _encode_scalar_list_item(indent: str, v: Any, out: list[str], path: str) -> 
     elif isinstance(v, Tagged):
         if "\n" in v.value or "\r" in v.value:
             out.append(f"{indent}- !{v.tag} |")
-            for line in v.value.splitlines():
+            for line in re.split(r"\r?\n", v.value):
                 out.append(f"{indent}  {line}")
             out.append(f"{indent}|")
         else:
