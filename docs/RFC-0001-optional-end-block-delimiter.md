@@ -7,10 +7,13 @@
 | **创建日期** | 2026-09-29 |
 | **目标版本** | XUN 0.2.0（待定） |
 | **优先级** | P0（核心编辑体验） |
-| **影响语言** | JavaScript ✅ / Python ✅ / Go ✅ / Rust / Java / C |
+| **影响语言** | JavaScript ✅ / Python ✅ / Go ✅ / Rust ✅ / Java ✅ / C ✅ |
 | **JS 实现 commit** | `8f3b294` feat(javascript): implement RFC-0001 optional 'end' block delimiter |
 | **Python 实现 commit** | `25c8d8e` feat(python): implement RFC-0001 optional 'end' block delimiter + RFC-0002 inline object/array literals |
 | **Go 实现 commit** | `8c198f5` feat(go): implement RFC-0001 'end' block delimiter and RFC-0002 inline object/array literals |
+| **Rust 实现 commit** | `88ce01c` feat(rust): implement RFC-0001 optional 'end' block delimiter + RFC-0002 inline object/array literals |
+| **Java 实现 commit** | `6268ffd` feat(java): implement RFC-0001 'end' block delimiter + RFC-0002 inline object/array literals |
+| **C 实现 commit** | `058200e` feat(c): implement RFC-0001 'end' block delimiter + RFC-0002 inline object/array literals |
 
 ---
 

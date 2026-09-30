@@ -16,8 +16,8 @@ v0.1.x ─── 当前稳定版
 
 | RFC | 标题 | 状态 | 目标版本 | 实现状态 |
 | :--- | :--- | :--- | :--- | :--- |
-| [RFC-0001](./RFC-0001-optional-end-block-delimiter.md) | 可选 `end` 块闭合标记 | Draft | v0.2.0 | **JS ✅ Python ✅ Go ✅** |
-| [RFC-0002](./RFC-0002-inline-object-array-literals.md) | 内联对象 / 数组字面量 | Draft | v0.2.0 | **JS ✅ Python ✅ Go ✅** |
+| [RFC-0001](./RFC-0001-optional-end-block-delimiter.md) | 可选 `end` 块闭合标记 | Draft | v0.2.0 | **JS ✅ Python ✅ Go ✅ Rust ✅ Java ✅ C ✅** |
+| [RFC-0002](./RFC-0002-inline-object-array-literals.md) | 内联对象 / 数组字面量 | Draft | v0.2.0 | **JS ✅ Python ✅ Go ✅ Rust ✅ Java ✅ C ✅** |
 
 ## 实现进度
 
@@ -26,9 +26,9 @@ v0.1.x ─── 当前稳定版
 | JavaScript | ✅ MVP | ✅ MVP | 86 tests, 0 fail |
 | Python | ✅ MVP | ✅ MVP | 81 tests, 0 fail |
 | Go | ✅ MVP | ✅ MVP | 51 tests, 0 fail |
-| Rust | — | — | 待移植 |
-| Java | — | — | 待移植 |
-| C | — | — | 待移植 |
+| Rust | ✅ MVP | ✅ MVP | 57 tests, 0 fail |
+| Java | ✅ MVP | ✅ MVP | 58 tests, 0 fail |
+| C | ✅ MVP | ✅ MVP | 43 tests, 0 fail |
 
 ### 关键 commit
 
@@ -38,6 +38,9 @@ v0.1.x ─── 当前稳定版
 | JavaScript RFC-0002 | `4c061f9` | +308 |
 | Python RFC-0001+0002 | `25c8d8e` | +850 / -48 |
 | Go RFC-0001+0002 | `8c198f5` | +893 / -21 |
+| Rust RFC-0001+0002 | `88ce01c` | +950 / -39 |
+| Java RFC-0001+0002 | `6268ffd` | +1004 / -90 |
+| C RFC-0001+0002 | `058200e` | +1418 / -329 |
 
 ## 设计哲学摘要
 
