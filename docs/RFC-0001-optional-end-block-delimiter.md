@@ -2,12 +2,13 @@
 
 | 字段 | 值 |
 | :--- | :--- |
-| **状态** | Draft（草案） |
+| **状态** | Draft（草案）；JavaScript 已落地 MVP（v0.2.0-dev） |
 | **作者** | XUN Working Group |
 | **创建日期** | 2026-09-29 |
 | **目标版本** | XUN 0.2.0（待定） |
 | **优先级** | P0（核心编辑体验） |
-| **影响语言** | JavaScript / Python / Go / Rust / Java / C |
+| **影响语言** | JavaScript ✅ / Python / Go / Rust / Java / C |
+| **JS 实现 commit** | `8f3b294` feat(javascript): implement RFC-0001 optional 'end' block delimiter |
 
 ---
 

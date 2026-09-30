@@ -2,12 +2,13 @@
 
 | 字段 | 值 |
 | :--- | :--- |
-| **状态** | Draft（草案） |
+| **状态** | Draft（草案）；JavaScript 已落地 MVP（v0.2.0-dev） |
 | **作者** | XUN Working Group |
 | **创建日期** | 2026-09-29 |
 | **目标版本** | XUN 0.2.0（待定） |
 | **优先级** | P1（Token 效率） |
-| **影响语言** | JavaScript / Python / Go / Rust / Java / C |
+| **影响语言** | JavaScript ✅ / Python / Go / Rust / Java / C |
+| **JS 实现 commit** | `4c061f9` feat(javascript): implement RFC-0002 inline object/array literals |
 
 ---
 

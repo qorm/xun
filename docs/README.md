@@ -14,10 +14,21 @@ v0.1.x ─── 当前稳定版
 
 ## RFC 索引
 
-| RFC | 标题 | 状态 | 目标版本 |
+| RFC | 标题 | 状态 | 目标版本 | 实现状态 |
+| :--- | :--- | :--- | :--- | :--- |
+| [RFC-0001](./RFC-0001-optional-end-block-delimiter.md) | 可选 `end` 块闭合标记 | Draft | v0.2.0 | **JavaScript ✅** |
+| [RFC-0002](./RFC-0002-inline-object-array-literals.md) | 内联对象 / 数组字面量 | Draft | v0.2.0 | **JavaScript ✅** |
+
+## 实现进度
+
+| 语言 | RFC-0001 | RFC-0002 | 测试用例 |
 | :--- | :--- | :--- | :--- |
-| [RFC-0001](./RFC-0001-optional-end-block-delimiter.md) | 可选 `end` 块闭合标记 | Draft | v0.2.0 |
-| [RFC-0002](./RFC-0002-inline-object-array-literals.md) | 内联对象 / 数组字面量 | Draft | v0.2.0 |
+| JavaScript | ✅ MVP | ✅ MVP | 86 tests, 0 fail |
+| Python | — | — | 待移植 |
+| Go | — | — | 待移植 |
+| Rust | — | — | 待移植 |
+| Java | — | — | 待移植 |
+| C | — | — | 待移植 |
 
 ## 设计哲学摘要
 
