@@ -387,6 +387,119 @@ query: !sql |
 - **正文缩进**：正文每行比开块所在行多缩进 2 个空格，解析时会自动去除这 2 个基础空格。
 - **字面量保证**：多行块内部的所有字符（包括 `#`、`:`、`-`、`!` 等）均作为普通字符原样保留。
 
+### 6. 可选块闭合标记 `end` (Optional `end` Block Delimiter)
+
+> **规范状态**：v0.2.0-dev 新增（RFC-0001）。**完全向后兼容**：所有 v0.1.x 文档无需修改。
+
+XUN 默认仍依靠缩进表达块边界。同时允许在块闭合处可选地写 `end`（裸）或 `end <key>`（带键名），用于：
+
+1. **防止拷贝粘贴吞噬子节点**（粘贴代码即使缩进错位也不会被错误吞并）
+2. **精确错误定位**（`end-key mismatch` 错误指向具体哪个块未闭合）
+3. **嵌套 HCL/JSON 风格片段**（不依赖缩进也能正确表达边界）
+4. **自动生成器鲁棒性**（生成器输出不会被 BOM / 前置注释扰乱的起始列破坏）
+
+```xun
+server:                      # 字典头（缩进 0）
+  host: localhost
+  port: !n 8080
+  tls:
+    cert: /etc/ssl/cert.pem
+    mode: !o 755
+  end tls                    # ← 可选：显式闭合 tls 块
+end server                   # ← 可选：显式闭合 server 块
+
+proxy:                       # 缩进回到 0，开始新顶层块
+  host: 10.0.0.1
+end proxy
+```
+
+规则：
+
+- **完全可选**：不写 `end` 时，旧规则（缩进 ≤ 父层时隐式闭合）继续生效。
+- **`end` 与块头同列**：`end server` 写在与 `server:` 相同的缩进层（不是 body 缩进）。
+- **`end <key>` 验证键名**：key 不匹配抛 `E0042 end-key mismatch: expected 'A', got 'B'`。
+- **`end` 作为普通字典键名**：合法（如 `end: foo`），解析器只在**独立成行**且**严格等于 `end` 或 `end <key>`** 时才识别为闭合标记。
+- **多行块内字面保留**：`| ... |` 内部的 `end` 一词不视为闭合标记。
+- **编码器不自动加 `end`**（RFC Phase 1）：`encode()` 仍输出纯缩进形式。
+
+错误码：
+
+| 错误码 | 描述 |
+| :--- | :--- |
+| `E0041` | unexpected 'end' (no open block) |
+| `E0042` | end-key mismatch: expected '%s', got '%s' |
+| `W0011` | block '%s' lacks explicit 'end' (style hint) |
+
+详细规范：[`docs/RFC-0001-optional-end-block-delimiter.md`](docs/RFC-0001-optional-end-block-delimiter.md)。
+
+### 7. 内联对象 / 数组字面量 (Inline Object & Array Literals)
+
+> **规范状态**：v0.2.0-dev 新增（RFC-0002）。**完全向后兼容**。
+
+用 `{key: value, ...}` 表达单行内联对象字面量，用于压缩"大量重复对象"配置（如 k8s pod 列表、Terraform resource 列表）。
+
+#### 7.1 作为列表项
+
+```xun
+servers:
+  - {host: 10.0.0.1, port: 80, zone: us-east-1a}
+  - {host: 10.0.0.2, port: 80, zone: us-east-1b}
+  - {host: 10.0.0.3, port: 80, zone: us-east-1c}
+```
+
+#### 7.2 作为紧凑数组元素
+
+```xun
+peers: [{host: a, port: 80}, {host: b, port: 81}]
+
+# 带显式 tag（推荐，语义更清晰）：
+matrix: !o[{a: 1, b: 2}, {c: 3, d: 4}]
+```
+
+#### 7.3 块形式与内联形式自由混用
+
+```xun
+servers:
+  - {host: 10.0.0.1, port: 80}        # 内联
+  - host: 10.0.0.2                     # 块
+    port: 81
+    tls:
+      cert: /etc/ssl/cert.pem
+```
+
+#### 7.4 值类型支持
+
+内联对象中的 value 支持与块形式相同的语法：
+
+| 形式 | 示例 | 含义 |
+| :--- | :--- | :--- |
+| 裸字符串 | `name: alice` | 字符串值 |
+| 引号字符串 | `name: "alice"` | 保留首尾空格 / 含特殊字符 |
+| 类型 Tag | `port: !n 8080` | 强类型值（与 `!n[80, 443]` 一致） |
+| 紧凑数组 | `tags: !n[80, 443]` | Tag 紧凑数组 |
+| 空值 | `name:` | 空字符串（等价于 `name:`） |
+
+#### 7.5 体积收益（20 个对象 × 5 字段实测）
+
+| 格式 | 行数 | 字节 | Token |
+| :--- | :--- | :--- | :--- |
+| XUN 块形式（实施前） | 100 | ~2400 | ~620 |
+| **XUN 内联对象（实施后）** | **23** | **~1100** | **~290** |
+| HCL | 22 | ~1300 | ~340 |
+| JSON（pretty） | 100 | ~3200 | ~880 |
+
+**XUN 在大量重复对象场景下 Token 消耗降低约 53%**，首次低于 HCL 约 15%。
+
+规则：
+
+- **`{` `}` 必须成对**：内联对象必须以 `{` 开头、`}` 结尾
+- **同层互斥**：与现有规则一致——同一层级要么全是字典键值对，要么全是列表项
+- **键值分隔符**：必须是 `: `（冒号后跟空格）或行尾单独的 `:`（与 §2 一致）
+- **重复键抛错**：`{a: 1, a: 2}` 抛 `duplicate key 'a'`
+- **编码器不自动用内联对象**（RFC Phase 1）：`encode()` 仍输出纯块形式
+
+详细规范：[`docs/RFC-0002-inline-object-array-literals.md`](docs/RFC-0002-inline-object-array-literals.md)。
+
 ---
 
 ## AI 与开发者编写准则 (AI Guidelines & Cheatsheet)
@@ -403,6 +516,9 @@ query: !sql |
 7. **多行块必须闭合**：以 `|` 开始的多行文本块，必须在同级缩进以 `|` 显式闭合。
 8. **空容器显式书写**：空字典写 `{}`，空列表写 `[]`。
 9. **没有 null**：不需要的字段直接省略，或者用 `key:` 表示空字符串。
+10. **`end` 关键字可选但同缩进**：用 `end` 或 `end <key>` 显式闭合时，`end` 行与块头（`key:`）同缩进，不是 body 缩进。
+11. **内联对象可压缩大量重复**：5+ 个相似对象的列表（k8s pod、server replica）用 `- {key: val, ...}` 单行形式可省 ~50% Token。
+12. **内联对象 key:value 分隔**：必须 `: `（冒号+空格）或 trailing `:`；与块形式规则一致。
 
 ### 正确与错误模式对比 (Do's & Don'ts)
 
@@ -418,6 +534,9 @@ query: !sql |
 | **字符串数组** | `tags: !s[a, b]` | `tags: !s[]`<br>`  - a`<br>`  - b` | 字符串数组禁止使用紧凑逗号形式 |
 | **多行文本** | `desc: \|`<br>`  hello` （未闭合） | `desc: \|`<br>`  hello`<br>`\|` | 多行块必须显式以同级 `\|` 闭合 |
 | **空字典** | `meta:` （下无内容表示空串） | `meta: {}` | 空字典必须显式写 `{}` |
+| **`end` 缩进位置** | `server:`<br>`  host: a`<br>`  end server`（与 body 同缩进） | `server:`<br>`  host: a`<br>`end server`（与 `server:` 同缩进） | `end` 与块头同列，不是 body 缩进 |
+| **内联对象分隔** | `{a:1, b:2}`（无空格） | `{a: 1, b: 2}`（冒号后必须有空格） | 与块形式规则一致：`:` 必须跟空格或 trailing `:` |
+| **重复对象列表** | `replicas:`<br>`  - host: a`<br>`    port: 80`<br>`  - host: b`<br>`    port: 81` | `replicas:`<br>`  - {host: a, port: 80}`<br>`  - {host: b, port: 81}` | 大量重复对象用内联对象可省 ~50% Token |
 
 ---
 

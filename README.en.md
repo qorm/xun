@@ -367,6 +367,119 @@ query: !sql |
 - **Body Indent**: Each line of the body is indented 2 spaces beyond the opening key; these 2 baseline spaces are stripped during parsing.
 - **Literal Contents**: All characters inside the multiline body (including `#`, `:`, `-`, `!`) are preserved literally.
 
+### 6. Optional `end` Block Delimiter
+
+> **Status**: Added in v0.2.0-dev (RFC-0001). **Fully backward-compatible**: all v0.1.x documents parse unchanged.
+
+XUN still uses indentation to express block boundaries by default. As an optional enhancement, blocks may be closed explicitly with `end` (bare) or `end <key>` (with key). Use cases:
+
+1. **Prevent paste-as-you-go from swallowing sub-nodes** (wrong-indent pastes are not silently dropped)
+2. **Precise error localization** (`end-key mismatch` points to the specific unclosed block)
+3. **Nest HCL/JSON-style fragments** without depending on indentation
+4. **Robustness for auto-generators** (BOM / leading comments don't break the starting column)
+
+```xun
+server:                      # dict header (indent 0)
+  host: localhost
+  port: !n 8080
+  tls:
+    cert: /etc/ssl/cert.pem
+    mode: !o 755
+  end tls                    # ← optional: explicit close of tls
+end server                   # ← optional: explicit close of server
+
+proxy:                       # indent back to 0; new top-level block
+  host: 10.0.0.1
+end proxy
+```
+
+Rules:
+
+- **Fully optional**: without `end`, the existing rule (dedent implicitly closes) still applies.
+- **`end` shares indent with the block header**: `end server` is written at the same indent as `server:`, not the body indent.
+- **`end <key>` validates the key**: mismatch throws `E0042 end-key mismatch: expected 'A', got 'B'`.
+- **`end` as a regular dict key is allowed** (e.g. `end: foo`); the parser only recognizes `end` / `end <key>` when it stands alone as a full line.
+- **Inside multiline blocks** `| ... |`, the literal word `end` is preserved.
+- **Encoder does not emit `end` automatically** (RFC Phase 1): `encode()` still outputs pure indented form.
+
+Error codes:
+
+| Code | Description |
+| :--- | :--- |
+| `E0041` | unexpected 'end' (no open block) |
+| `E0042` | end-key mismatch: expected '%s', got '%s' |
+| `W0011` | block '%s' lacks explicit 'end' (style hint) |
+
+Full spec: [`docs/RFC-0001-optional-end-block-delimiter.md`](docs/RFC-0001-optional-end-block-delimiter.md).
+
+### 7. Inline Object & Array Literals
+
+> **Status**: Added in v0.2.0-dev (RFC-0002). **Fully backward-compatible**.
+
+Use `{key: value, ...}` to express a single-line inline object literal, designed to compress "many repeated objects" configurations (k8s pod lists, Terraform resource lists, etc.).
+
+#### 7.1 As a List Item
+
+```xun
+servers:
+  - {host: 10.0.0.1, port: 80, zone: us-east-1a}
+  - {host: 10.0.0.2, port: 80, zone: us-east-1b}
+  - {host: 10.0.0.3, port: 80, zone: us-east-1c}
+```
+
+#### 7.2 As Compact Array Elements
+
+```xun
+peers: [{host: a, port: 80}, {host: b, port: 81}]
+
+# With explicit tag (recommended, semantics are clearer):
+matrix: !o[{a: 1, b: 2}, {c: 3, d: 4}]
+```
+
+#### 7.3 Free Mix of Block and Inline Form
+
+```xun
+servers:
+  - {host: 10.0.0.1, port: 80}        # inline
+  - host: 10.0.0.2                     # block
+    port: 81
+    tls:
+      cert: /etc/ssl/cert.pem
+```
+
+#### 7.4 Value Type Support
+
+Values inside an inline object follow the same syntax as block form:
+
+| Form | Example | Meaning |
+| :--- | :--- | :--- |
+| Bare string | `name: alice` | string value |
+| Quoted string | `name: "alice"` | preserves leading/trailing spaces / special chars |
+| Type tag | `port: !n 8080` | strongly-typed value (same as `!n[80, 443]`) |
+| Compact array | `tags: !n[80, 443]` | tagged compact array |
+| Empty value | `name:` | empty string (equivalent to `name:`) |
+
+#### 7.5 Volume Savings (20 objects × 5 fields benchmark)
+
+| Format | Lines | Bytes | Tokens |
+| :--- | :--- | :--- | :--- |
+| XUN block form (pre-RFC-0002) | 100 | ~2400 | ~620 |
+| **XUN inline objects (post-RFC-0002)** | **23** | **~1100** | **~290** |
+| HCL | 22 | ~1300 | ~340 |
+| JSON (pretty) | 100 | ~3200 | ~880 |
+
+**XUN reduces Token consumption by ~53% in repetitive-object scenarios**, becoming ~15% smaller than HCL for the first time.
+
+Rules:
+
+- **`{` `}` must be paired**: inline objects must start with `{` and end with `}`.
+- **Same-layer exclusivity**: same as existing rules — a layer is either all dict entries or all list items.
+- **Key-value separator**: must be `: ` (colon + space) or trailing `:` alone (consistent with §2).
+- **Duplicate keys throw**: `{a: 1, a: 2}` throws `duplicate key 'a'`.
+- **Encoder does not emit inline objects automatically** (RFC Phase 1): `encode()` still outputs pure block form.
+
+Full spec: [`docs/RFC-0002-inline-object-array-literals.md`](docs/RFC-0002-inline-object-array-literals.md).
+
 ---
 
 ## AI & Developer Authoring Guidelines (Do's & Don'ts)
@@ -383,6 +496,9 @@ Follow these rules to ensure 100% compliant XUN generation:
 7. **Always Close Multiline Blocks**: Every multiline block starting with `|` must end with `|` at the matching indentation level.
 8. **Explicit Empty Containers**: Write `{}` for empty dictionaries, `[]` for empty lists.
 9. **No Null**: Omit the key entirely or use `key:` for an empty string.
+10. **`end` keyword is optional but shares indent with block header**: When using `end` or `end <key>` explicitly, the `end` line must be at the same indent as the block header (`key:`), not the body indent.
+11. **Inline objects compress repetitive lists**: For lists of 5+ similar objects (k8s pods, server replicas), use `- {key: val, ...}` single-line form to save ~50% Tokens.
+12. **Inline object separator**: Must be `: ` (colon + space) or trailing `:` alone — consistent with block form rules.
 
 ### Pattern Comparison (Do's & Don'ts)
 
@@ -398,6 +514,9 @@ Follow these rules to ensure 100% compliant XUN generation:
 | **String array** | `tags: !s[a, b]` | `tags: !s[]`<br>`  - a`<br>`  - b` | String arrays cannot use compact comma form |
 | **Multiline body** | `desc: \|`<br>`  hello` (unclosed) | `desc: \|`<br>`  hello`<br>`\|` | Multiline block must have matching closing `\|` |
 | **Empty dict** | `meta:` (empty subtree) | `meta: {}` | Empty dict must be written `{}` explicitly |
+| **`end` indent level** | `server:`<br>`  host: a`<br>`  end server` (same as body) | `server:`<br>`  host: a`<br>`end server` (same as `server:`) | `end` shares indent with block header, not body indent |
+| **Inline object separator** | `{a:1, b:2}` (no space) | `{a: 1, b: 2}` (space after colon) | Same as block form: `:` must be followed by space or be trailing |
+| **Repetitive object list** | `replicas:`<br>`  - host: a`<br>`    port: 80`<br>`  - host: b`<br>`    port: 81` | `replicas:`<br>`  - {host: a, port: 80}`<br>`  - {host: b, port: 81}` | Inline objects save ~50% Tokens for repetitive lists |
 
 ---
 
