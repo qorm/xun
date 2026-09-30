@@ -412,6 +412,7 @@ pub fn parse(source: &str) -> Result<Value, Error> {
     Parser {
         lines: split_lines(source)?,
         i: 0,
+        open_blocks: Vec::new(),
     }
     .parse_document()
 }
@@ -469,6 +470,9 @@ fn make_line(raw: &str, n: usize) -> Result<Line, Error> {
 struct Parser {
     lines: Vec<Line>,
     i: usize,
+    // RFC-0001: stack of (indent, expected_key) used to validate 'end' / 'end <key>'.
+    // expected_key is None for the root block or when the value has no name.
+    open_blocks: Vec<(usize, Option<String>)>,
 }
 
 impl Parser {
@@ -486,6 +490,38 @@ impl Parser {
         }
     }
 
+    // RFC-0001: try to consume an 'end' or 'end <key>' statement at the given indent.
+    // Returns Ok(true) if consumed, Ok(false) if the peek line is not an end statement.
+    // Returns Err on key mismatch.
+    // expected_key: the key of the immediately enclosing dict (None for root / unnamed).
+    fn try_consume_end(&mut self, indent: usize, expected_key: Option<&str>) -> Result<bool, Error> {
+        let l = match self.peek() {
+            Some(l) => l,
+            None => return Ok(false),
+        };
+        if l.blank || l.indent != indent {
+            return Ok(false);
+        }
+        if l.code == "end" {
+            self.i += 1;
+            return Ok(true);
+        }
+        if let Some(rest) = l.code.strip_prefix("end ") {
+            let end_key = rest.split_whitespace().next().unwrap_or("");
+            if end_key.is_empty() {
+                return Ok(false);
+            }
+            if let Some(ek) = expected_key {
+                if ek != end_key {
+                    return Err(err(l.n, format!("end-key mismatch: expected '{ek}', got '{end_key}'")));
+                }
+            }
+            self.i += 1;
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
     fn parse_document(&mut self) -> Result<Value, Error> {
         self.skip_noise();
         if self.peek().is_none() {
@@ -498,19 +534,31 @@ impl Parser {
         if self.is_list_item(first) {
             return Err(err(first.n, "root must be a dictionary"));
         }
-        self.parse_dict(0, 0)
+        // RFC-0001: track root block so trailing 'end' can close it.
+        self.open_blocks.push((0, None));
+        let result = self.parse_dict(0, 0, None);
+        self.open_blocks.pop();
+        if result.is_ok() {
+            self.skip_noise();
+            let consumed = self.try_consume_end(0, None)?;
+            let _ = consumed;
+        }
+        result
     }
 
-    fn parse_dict(&mut self, indent: usize, depth: usize) -> Result<Value, Error> {
+    fn parse_dict(&mut self, indent: usize, depth: usize, dict_key: Option<&str>) -> Result<Value, Error> {
         if depth > 64 {
             let n = self.peek().map(|l| l.n).unwrap_or(0);
             return Err(err(n, "nesting exceeds 64"));
         }
         let mut obj = Vec::new();
-        while let Some(l) = self.peek() {
+        while self.peek().is_some() {
+            self.skip_noise();
+            let Some(l) = self.peek() else {
+                break;
+            };
             if l.blank {
-                self.skip_noise();
-                continue;
+                break;
             }
             if l.indent < indent {
                 break;
@@ -518,32 +566,40 @@ impl Parser {
             if l.indent > indent {
                 return Err(err(l.n, "invalid indent jump"));
             }
+            // RFC-0001: 'end' at body indent stops the dict (caller validates via try_consume_end).
+            if l.code == "end" || l.code.starts_with("end ") {
+                break;
+            }
             if self.is_list_item(l) {
                 return Err(err(l.n, "cannot mix list items into a dictionary"));
             }
-            let text = l.text.clone();
+            let code = l.code.clone();
             let n = l.n;
-            let (key, rest) = split_key(&text, n)?;
-            if obj.iter().any(|(k, _)| k == &key) {
+            let (key, rest) = split_key(&code, n)?;
+            if obj.iter().any(|(k, _): &(String, Value)| k == &key) {
                 return Err(err(n, format!("duplicate key '{key}'")));
             }
             self.i += 1;
-            let val = self.parse_value(&rest, indent, n, depth + 1)?;
+            let val = self.parse_value(&rest, indent, n, depth + 1, Some(&key))?;
             obj.push((key, val));
         }
+        let _ = dict_key; // accepted for API symmetry; end validation is the caller's job
         Ok(Value::Dict(obj))
     }
 
-    fn parse_list(&mut self, indent: usize, depth: usize, item_tag: Option<&str>) -> Result<Value, Error> {
+    fn parse_list(&mut self, indent: usize, depth: usize, item_tag: Option<&str>, parent_key: Option<&str>) -> Result<Value, Error> {
         if depth > 64 {
             let n = self.peek().map(|l| l.n).unwrap_or(0);
             return Err(err(n, "nesting exceeds 64"));
         }
         let mut arr = Vec::new();
-        while let Some(l) = self.peek() {
+        while self.peek().is_some() {
+            self.skip_noise();
+            let Some(l) = self.peek() else {
+                break;
+            };
             if l.blank {
-                self.skip_noise();
-                continue;
+                break;
             }
             if l.indent < indent {
                 break;
@@ -551,41 +607,130 @@ impl Parser {
             if l.indent > indent {
                 return Err(err(l.n, "invalid indent jump"));
             }
+            // RFC-0001: 'end' at list level stops the list.
+            if l.code == "end" || l.code.starts_with("end ") {
+                break;
+            }
             if !self.is_list_item(l) {
                 return Err(err(l.n, "cannot mix dictionary keys into a list"));
             }
-            let text = l.text.clone();
+            let code = l.code.clone();
             let n = l.n;
-            let rest = if text == "-" { "" } else { &text[2..] };
+            let rest: &str = if code == "-" { "" } else { &code[2..] };
             self.i += 1;
-            let mut val = self.parse_value(rest, indent, n, depth + 1)?;
+            if looks_like_dict_entry(rest) {
+                if let Some(t) = item_tag {
+                    return Err(err(n, format!("!{t}[] cannot contain dictionary entries")));
+                }
+                // RFC-0002: inline object literal {key: value, ...} as a list item.
+                if rest.trim_start().starts_with('{') {
+                    arr.push(parse_inline_dict(rest, n)?);
+                    continue;
+                }
+                arr.push(self.parse_inline_dict_entry(rest, indent + 2, n, depth + 1)?);
+                continue;
+            }
+            let mut val = self.parse_value(rest, indent, n, depth + 1, None)?;
             if let Some(t) = item_tag {
                 val = apply_tag(t, &glyph_of(&val)?, n)?;
             }
             arr.push(val);
         }
+        let _ = parent_key; // accepted for API symmetry; end validation is the caller's job
         Ok(Value::List(arr))
     }
 
-    fn is_list_item(&self, l: &Line) -> bool {
-        l.text == "-" || l.text.starts_with("- ")
+    fn parse_inline_dict_entry(
+        &mut self,
+        first: &str,
+        key_indent: usize,
+        line_no: usize,
+        depth: usize,
+    ) -> Result<Value, Error> {
+        if depth > 64 {
+            return Err(err(line_no, "nesting exceeds 64"));
+        }
+        let mut obj: Vec<(String, Value)> = Vec::new();
+        let (key, rest) = split_key(first, line_no)?;
+        obj.push((key.clone(), self.parse_value(&rest, key_indent, line_no, depth + 1, Some(&key))?));
+        while self.peek().is_some() {
+            self.skip_noise();
+            let Some(l) = self.peek() else {
+                break;
+            };
+            if l.blank {
+                break;
+            }
+            if l.indent < key_indent {
+                break;
+            }
+            if l.indent > key_indent {
+                return Err(err(l.n, "invalid indent jump"));
+            }
+            if self.is_list_item(l) {
+                break;
+            }
+            let text = l.text.clone();
+            let n = l.n;
+            let (key, rest) = split_key(&text, n)?;
+            if obj.iter().any(|(k, _): &(String, Value)| k == &key) {
+                return Err(err(n, format!("duplicate key '{key}'")));
+            }
+            self.i += 1;
+            let val = self.parse_value(&rest, key_indent, n, depth + 1, Some(&key))?;
+            obj.push((key, val));
+        }
+        Ok(Value::Dict(obj))
     }
 
-    fn parse_value(&mut self, raw: &str, parent_indent: usize, line_no: usize, depth: usize) -> Result<Value, Error> {
+    fn is_list_item(&self, l: &Line) -> bool {
+        l.code == "-" || l.code.starts_with("- ")
+    }
+
+    fn parse_value(&mut self, raw: &str, parent_indent: usize, line_no: usize, depth: usize, value_key: Option<&str>) -> Result<Value, Error> {
+        let raw = strip_trailing_comment(raw);
+        let raw = raw.as_str();
         if raw == "[]" {
             return Ok(Value::List(vec![]));
         }
         if raw == "{}" {
             return Ok(Value::Dict(vec![]));
         }
-        if let Some(closer) = match_multiline(raw) {
-            return self.read_multiline(parent_indent, None, &closer, line_no);
+        if let Some((closer, chomp)) = match_multiline(raw) {
+            return self.read_multiline(parent_indent, None, &closer, chomp, line_no);
         }
         if raw.starts_with('!') {
-            return self.parse_tagged(raw, parent_indent, line_no, depth);
+            return self.parse_tagged(raw, parent_indent, line_no, depth, value_key);
+        }
+        // RFC-0002: untagged compact array of inline objects: [{...}, {...}]
+        if raw.starts_with('[') && raw.ends_with(']') && raw != "[]" {
+            let inner = &raw[1..raw.len() - 1];
+            let pieces = split_top_level_commas(inner);
+            if pieces.iter().any(|p| p.trim_start().starts_with('{')) {
+                let mut out = Vec::new();
+                for piece in &pieces {
+                    let t = piece.trim();
+                    if t.starts_with('{') {
+                        out.push(parse_inline_dict(t, line_no)?);
+                    } else {
+                        out.push(Value::String(t.to_string()));
+                    }
+                }
+                return Ok(Value::List(out));
+            }
         }
         if raw.is_empty() {
-            return self.parse_empty_or_nested(parent_indent, line_no, depth, None);
+            // RFC-0001: nested block — header at parent_indent, named value_key.
+            let ek_owned = value_key.map(|s| s.to_string());
+            self.open_blocks.push((parent_indent, ek_owned.clone()));
+            let result = self.parse_empty_or_nested(parent_indent, line_no, depth, None, value_key);
+            self.open_blocks.pop();
+            if result.is_ok() {
+                self.skip_noise();
+                let consumed = self.try_consume_end(parent_indent, value_key)?;
+                let _ = consumed;
+            }
+            return result;
         }
         if raw.starts_with('"') {
             return Ok(Value::String(parse_quoted_string(raw, line_no)?));
@@ -593,7 +738,7 @@ impl Parser {
         Ok(Value::String(raw.to_string()))
     }
 
-    fn parse_tagged(&mut self, raw: &str, parent_indent: usize, line_no: usize, depth: usize) -> Result<Value, Error> {
+    fn parse_tagged(&mut self, raw: &str, parent_indent: usize, line_no: usize, depth: usize, value_key: Option<&str>) -> Result<Value, Error> {
         let (tag, rest) = parse_tag_head(raw).ok_or_else(|| err(line_no, "invalid type tag"))?;
         if let Some(inner) = rest.strip_prefix('[') {
             if tag == "s" && rest != "[]" {
@@ -603,7 +748,31 @@ impl Parser {
                 return Err(err(line_no, "unclosed compact array"));
             };
             if inner.is_empty() {
-                return self.parse_empty_or_nested(parent_indent, line_no, depth, Some(&tag));
+                // RFC-0001: track tagged block for 'end' validation
+                let ek_owned = value_key.map(|s| s.to_string());
+                self.open_blocks.push((parent_indent, ek_owned.clone()));
+                let result = self.parse_empty_or_nested(parent_indent, line_no, depth, Some(&tag), value_key);
+                self.open_blocks.pop();
+                if result.is_ok() {
+                    self.skip_noise();
+                    let consumed = self.try_consume_end(parent_indent, value_key)?;
+                    let _ = consumed;
+                }
+                return result;
+            }
+            // RFC-0002: detect inline object elements {key: val, ...} within compact arrays.
+            let pieces = split_top_level_commas(inner);
+            if pieces.iter().any(|p| p.trim_start().starts_with('{')) {
+                let mut out = Vec::new();
+                for piece in &pieces {
+                    let t = piece.trim();
+                    if t.starts_with('{') {
+                        out.push(parse_inline_dict(t, line_no)?);
+                    } else {
+                        out.push(apply_tag(&tag, t, line_no)?);
+                    }
+                }
+                return Ok(Value::List(out));
             }
             let mut out = Vec::new();
             for g in split_compact(inner) {
@@ -634,7 +803,7 @@ impl Parser {
         apply_tag(&tag, body, line_no)
     }
 
-    fn parse_empty_or_nested(&mut self, parent_indent: usize, _line_no: usize, depth: usize, item_tag: Option<&str>) -> Result<Value, Error> {
+    fn parse_empty_or_nested(&mut self, parent_indent: usize, _line_no: usize, depth: usize, item_tag: Option<&str>, value_key: Option<&str>) -> Result<Value, Error> {
         self.skip_noise();
         let child = parent_indent + 2;
         let Some(n) = self.peek() else {
@@ -655,24 +824,45 @@ impl Parser {
             return Err(err(n.n, "child indent must be parent + 2"));
         }
         if self.is_list_item(n) {
-            return self.parse_list(child, depth, item_tag);
+            return self.parse_list(child, depth, item_tag, value_key);
         }
         if let Some(t) = item_tag {
             return Err(err(n.n, format!("!{t}[] expected list items")));
         }
-        self.parse_dict(child, depth)
+        self.parse_dict(child, depth, value_key)
     }
 
-    fn read_multiline(&mut self, parent_indent: usize, tag: Option<&str>, closer: &str, line_no: usize) -> Result<Value, Error> {
+    fn read_multiline(
+        &mut self,
+        parent_indent: usize,
+        tag: Option<&str>,
+        closer: &str,
+        chomp: Chomp,
+        line_no: usize,
+    ) -> Result<Value, Error> {
         let base = parent_indent + 2;
-        let mut parts = Vec::new();
+        let mut parts: Vec<String> = Vec::new();
         while let Some(l) = self.peek() {
             let stripped = l.raw.trim_end_matches([' ', '\t']);
             let content = stripped.trim_start_matches(' ');
             let ind = l.raw.len() - l.raw.trim_start_matches(' ').len();
-            if !l.blank && ind == parent_indent && content == closer {
+            let closer_text = strip_trailing_comment(content);
+            if !l.blank && ind == parent_indent && closer_text == closer {
                 self.i += 1;
-                let s = parts.join("\n");
+                let mut s = parts.join("\n");
+                match chomp {
+                    Chomp::Strip => {
+                        while s.ends_with('\n') {
+                            s.pop();
+                        }
+                    }
+                    Chomp::Clip => {
+                        if !s.is_empty() && !s.ends_with('\n') {
+                            s.push('\n');
+                        }
+                    }
+                    Chomp::Exact => {}
+                }
                 if let Some(t) = tag {
                     if t != "s" {
                         return apply_tag(t, &s, line_no);
@@ -698,26 +888,104 @@ impl Parser {
     }
 }
 
-fn split_key(text: &str, n: usize) -> Result<(String, String), Error> {
-    if let Some(idx) = text.find(": ") {
-        return Ok((text[..idx].to_string(), text[idx + 2..].to_string()));
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Chomp {
+    Exact,
+    Strip,
+    Clip,
+}
+
+fn parse_quoted_prefix(raw: &str, line_no: usize) -> Result<(String, usize), Error> {
+    if !raw.starts_with('"') {
+        return Err(err(line_no, "quoted string must start with '\"'"));
     }
-    if text.ends_with(':') && text.len() > 1 {
-        return Ok((text[..text.len() - 1].to_string(), String::new()));
+    let mut out = String::new();
+    let mut iter = raw.char_indices();
+    iter.next(); // opening quote
+    while let Some((idx, ch)) = iter.next() {
+        match ch {
+            '\\' => match iter.next() {
+                Some((_, '\\')) => out.push('\\'),
+                Some((_, '"')) => out.push('"'),
+                Some((_, c)) => {
+                    return Err(err(line_no, format!("invalid escape \\{c} in quoted string")))
+                }
+                None => return Err(err(line_no, "unclosed escape in quoted string")),
+            },
+            '"' => return Ok((out, idx + 1)),
+            _ => out.push(ch),
+        }
+    }
+    Err(err(line_no, "unclosed quoted string"))
+}
+
+fn split_key(text: &str, n: usize) -> Result<(String, String), Error> {
+    if text.starts_with('"') {
+        let (key, end) = parse_quoted_prefix(text, n)?;
+        let after = &text[end..];
+        if after == ":" {
+            return Ok((key, String::new()));
+        }
+        if let Some(rest) = after.strip_prefix(": ") {
+            return Ok((key, rest.to_string()));
+        }
+        return Err(err(n, "expected ': ' or trailing ':' after quoted key"));
+    }
+    if let Some(idx) = text.find(": ") {
+        if idx > 0 {
+            let key = &text[..idx];
+            if key.ends_with(':') {
+                return Err(err(n, format!("key must not end with ':': '{key}'")));
+            }
+            return Ok((key.to_string(), text[idx + 2..].to_string()));
+        }
+    }
+    if text.ends_with(':') && text.chars().count() > 1 {
+        let key = &text[..text.len() - 1];
+        if key.ends_with(':') {
+            return Err(err(n, format!("key must not end with ':': '{key}'")));
+        }
+        return Ok((key.to_string(), String::new()));
     }
     Err(err(n, "expected ': ' or trailing ':'"))
 }
 
-fn match_multiline(raw: &str) -> Option<String> {
+fn match_multiline(raw: &str) -> Option<(String, Chomp)> {
     if raw == "|" {
-        return Some("|".to_string());
+        return Some(("|".to_string(), Chomp::Exact));
     }
-    if let Some(rest) = raw.strip_prefix('|') {
-        if is_ident(rest) {
-            return Some(rest.to_string());
+    if raw == "|-" {
+        return Some(("|".to_string(), Chomp::Strip));
+    }
+    if raw == "|+" {
+        return Some(("|".to_string(), Chomp::Clip));
+    }
+    let rest = raw.strip_prefix('|')?;
+    if let Some(stripped) = rest.strip_suffix('-') {
+        if is_ident(stripped) {
+            return Some((stripped.to_string(), Chomp::Strip));
         }
     }
+    if let Some(stripped) = rest.strip_suffix('+') {
+        if is_ident(stripped) {
+            return Some((stripped.to_string(), Chomp::Clip));
+        }
+    }
+    if is_ident(rest) {
+        return Some((rest.to_string(), Chomp::Exact));
+    }
     None
+}
+
+fn looks_like_dict_entry(s: &str) -> bool {
+    if s.is_empty() || s.starts_with('!') || s.starts_with('"') || s.starts_with('|') {
+        return false;
+    }
+    // RFC-0002: inline object literal {key: val, ...} counts as a dict entry
+    if s.starts_with('{') {
+        return true;
+    }
+    s.contains(": ") || (s.ends_with(':') && s.chars().count() > 1)
 }
 
 fn is_ident(s: &str) -> bool {
@@ -744,6 +1012,178 @@ fn parse_tag_head(raw: &str) -> Option<(String, String)> {
 
 fn split_compact(inner: &str) -> Vec<&str> {
     inner.split(',').map(|s| s.trim()).collect()
+}
+
+// RFC-0002: split a string by top-level commas, respecting brace, bracket and quote nesting.
+fn split_top_level_commas(inner: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut start = 0usize;
+    let mut brace = 0i32;
+    let mut bracket = 0i32;
+    let mut in_quote = false;
+    let mut escape = false;
+    let bytes = inner.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        let c = bytes[i];
+        if escape {
+            escape = false;
+            i += 1;
+            continue;
+        }
+        if in_quote {
+            if c == b'\\' {
+                escape = true;
+                i += 1;
+                continue;
+            }
+            if c == b'"' {
+                in_quote = false;
+            }
+            i += 1;
+            continue;
+        }
+        match c {
+            b'"' => in_quote = true,
+            b'{' => brace += 1,
+            b'}' => {
+                if brace > 0 {
+                    brace -= 1;
+                }
+            }
+            b'[' => bracket += 1,
+            b']' => {
+                if bracket > 0 {
+                    bracket -= 1;
+                }
+            }
+            b',' if brace == 0 && bracket == 0 => {
+                out.push(inner[start..i].to_string());
+                start = i + 1;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    let last = &inner[start..];
+    if !last.trim().is_empty() {
+        out.push(last.to_string());
+    }
+    out
+}
+
+// RFC-0002: parse inline object literal {key: value, key2: value2}.
+fn parse_inline_dict(text: &str, line_no: usize) -> Result<Value, Error> {
+    let trimmed = text.trim();
+    if !trimmed.starts_with('{') || !trimmed.ends_with('}') {
+        return Err(err(line_no, "inline object must be wrapped in '{...}'"));
+    }
+    let inner = &trimmed[1..trimmed.len() - 1];
+    if inner.trim().is_empty() {
+        return Ok(Value::Dict(Vec::new()));
+    }
+    let pieces = split_top_level_commas(inner);
+    let mut obj: Vec<(String, Value)> = Vec::new();
+    for piece in &pieces {
+        let t = piece.trim();
+        if t.is_empty() {
+            continue;
+        }
+        // Find top-level key separator ':' (with optional trailing ':').
+        let bytes = t.as_bytes();
+        let mut found: Option<usize> = None;
+        let mut in_quote = false;
+        let mut escape = false;
+        let mut i = 0;
+        while i < bytes.len() {
+            let c = bytes[i];
+            if escape {
+                escape = false;
+                i += 1;
+                continue;
+            }
+            if in_quote {
+                if c == b'\\' {
+                    escape = true;
+                    i += 1;
+                    continue;
+                }
+                if c == b'"' {
+                    in_quote = false;
+                }
+                i += 1;
+                continue;
+            }
+            match c {
+                b'"' => in_quote = true,
+                b':' => {
+                    if i + 1 == bytes.len() {
+                        found = Some(i);
+                        break;
+                    }
+                    if i + 1 < bytes.len() && bytes[i + 1] == b' ' {
+                        found = Some(i);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+        let Some(idx) = found else {
+            return Err(err(line_no, format!("inline object entry missing ': ' separator: '{t}'")));
+        };
+        let key_raw = t[..idx].trim();
+        let rest = t[idx + 1..].trim();
+        let key_owned;
+        let key: &str = if key_raw.starts_with('"') {
+            let (k, end) = parse_quoted_prefix(key_raw, line_no)?;
+            // Anything after the quoted prefix becomes part of rest (already trimmed above).
+            let _ = end;
+            key_owned = k;
+            key_owned.as_str()
+        } else {
+            key_raw
+        };
+        if key.is_empty() {
+            return Err(err(line_no, "empty key in inline object"));
+        }
+        if obj.iter().any(|(k, _)| k == key) {
+            return Err(err(line_no, format!("duplicate key '{key}'")));
+        }
+        let value: Value = if rest.is_empty() {
+            Value::String(String::new())
+        } else if rest.starts_with('"') {
+            Value::String(parse_quoted_string(rest, line_no)?)
+        } else if rest.starts_with('!') {
+            let (tag, tail) = parse_tag_head(rest).ok_or_else(|| err(line_no, format!("invalid tag in inline object: '{rest}'")))?;
+            if tail.is_empty() {
+                return Err(err(line_no, format!("missing value for !{tag}")));
+            }
+            if let Some(stripped) = tail.strip_prefix(' ') {
+                apply_tag(&tag, stripped, line_no)?
+            } else if let Some(arr) = tail.strip_prefix('[') {
+                let Some(arr) = arr.strip_suffix(']') else {
+                    return Err(err(line_no, "unclosed compact array in inline object"));
+                };
+                if arr.is_empty() {
+                    Value::List(Vec::new())
+                } else {
+                    let mut out = Vec::new();
+                    for g in split_compact(arr) {
+                        out.push(apply_tag(&tag, g, line_no)?);
+                    }
+                    Value::List(out)
+                }
+            } else {
+                return Err(err(line_no, "expected space or '[' after type tag in inline object"));
+            }
+        } else {
+            Value::String(rest.to_string())
+        };
+        obj.push((key.to_string(), value));
+    }
+    Ok(Value::Dict(obj))
 }
 
 fn glyph_of(v: &Value) -> Result<String, Error> {
@@ -1972,5 +2412,476 @@ char_cp: !c U+4E2D
         .unwrap();
         assert!(text.contains("8080: !s 8080"));
         assert!(text.contains("3.10: !s 3.10"));
+    }
+
+    #[test]
+    fn duration_supports_ms() {
+        assert_eq!(parse_duration("500ms").unwrap(), 0.5);
+        assert_eq!(parse_duration("15s500ms").unwrap(), 15.5);
+        assert_eq!(parse_duration("1d2h30m15s").unwrap(), 95415.0);
+        assert_eq!(parse_duration("1m").unwrap(), 60.0);
+        assert!(parse_duration("90 minutes").is_err());
+        let doc = decode("x: !du 500ms").unwrap();
+        assert_eq!(
+            dict_get(&doc, "x"),
+            Some(&Value::Tagged(Tagged { tag: "du".into(), value: "500ms".into() }))
+        );
+        let native = unpack(&doc).unwrap();
+        assert_eq!(dict_get(&native, "x"), Some(&Value::Float(0.5)));
+    }
+
+    #[test]
+    fn o_x_unix_tags_round_trip_via_tagged() {
+        assert_eq!(
+            dict_get(&decode("mode: !o 755").unwrap(), "mode"),
+            Some(&Value::Tagged(Tagged { tag: "o".into(), value: "755".into() }))
+        );
+        assert_eq!(
+            dict_get(&decode("h: !x DEAD_BEEF").unwrap(), "h"),
+            Some(&Value::Tagged(Tagged { tag: "x".into(), value: "DEAD_BEEF".into() }))
+        );
+        assert_eq!(
+            dict_get(&decode("u: !unix 1692000000").unwrap(), "u"),
+            Some(&Value::Tagged(Tagged { tag: "unix".into(), value: "1692000000".into() }))
+        );
+        assert_eq!(encode(&decode("mode: !o 755").unwrap()).unwrap(), "mode: !o 755\n");
+        assert_eq!(encode(&decode("h: !x DEAD_BEEF").unwrap()).unwrap(), "h: !x DEAD_BEEF\n");
+        assert_eq!(encode(&decode("u: !unix 1692000000").unwrap()).unwrap(), "u: !unix 1692000000\n");
+        let doc = decode("mode: !o 755\nh: !x DEAD_BEEF\nu: !unix 1692000000\n").unwrap();
+        let native = unpack(&doc).unwrap();
+        assert_eq!(dict_get(&native, "mode"), Some(&Value::Int(0o755)));
+        assert_eq!(dict_get(&native, "h"), Some(&Value::Int(0xdeadbeef)));
+        assert_eq!(dict_get(&native, "u"), Some(&Value::Int(1692000000)));
+        // to_number() on Tagged
+        let mode = dict_get(&doc, "mode").unwrap().as_tagged().unwrap();
+        assert_eq!(mode.to_number().unwrap(), 0o755 as f64);
+        let h = dict_get(&doc, "h").unwrap().as_tagged().unwrap();
+        assert_eq!(h.to_number().unwrap(), 3735928559.0);
+        let u = dict_get(&doc, "u").unwrap().as_tagged().unwrap();
+        assert_eq!(u.to_number().unwrap(), 1692000000.0);
+    }
+
+    #[test]
+    fn trailing_comments_are_stripped_outside_quotes_and_multiline() {
+        let get = |src: &str, k: &str| dict_get(&decode(src).unwrap(), k).cloned();
+        assert_eq!(get("port: 8080 # listen\n", "port"), Some(Value::String("8080".into())));
+        assert_eq!(get("a: foo # bar\n", "a"), Some(Value::String("foo".into())));
+        assert_eq!(get("a: foo#bar\n", "a"), Some(Value::String("foo#bar".into())));
+        assert_eq!(get("a: \"foo # bar\"\n", "a"), Some(Value::String("foo # bar".into())));
+        assert_eq!(get("a: # only comment\n", "a"), Some(Value::String(String::new())));
+        assert_eq!(
+            get("list:\n  - x # c\n  - y\n", "list"),
+            Some(Value::List(vec![
+                Value::String("x".into()),
+                Value::String("y".into())
+            ]))
+        );
+        assert_eq!(get("t: |\n  keep # me\n|\n", "t"), Some(Value::String("keep # me".into())));
+        assert_eq!(get("a: 1 # c\n# full line\nb: 2\n", "a"), Some(Value::String("1".into())));
+        assert_eq!(get("a: 1 # c\n# full line\nb: 2\n", "b"), Some(Value::String("2".into())));
+    }
+
+    #[test]
+    fn quoted_keys_and_key_validation() {
+        assert_eq!(
+            decode("\"my key\": 1").unwrap(),
+            dict_of(&[("my key", Value::String("1".into()))])
+        );
+        assert_eq!(
+            decode("\"a: b\": 1\nc: 2").unwrap(),
+            dict_of(&[
+                ("a: b", Value::String("1".into())),
+                ("c", Value::String("2".into()))
+            ])
+        );
+        assert_eq!(
+            decode("\"my key\":").unwrap(),
+            dict_of(&[("my key", Value::String(String::new()))])
+        );
+        assert!(decode("a:: 1").is_err());
+        // unquoted key may contain colon without following space
+        assert_eq!(
+            decode("a:b: 1").unwrap(),
+            dict_of(&[("a:b", Value::String("1".into()))])
+        );
+    }
+
+    fn dict_of(pairs: &[(&str, Value)]) -> Value {
+        Value::Dict(pairs.iter().map(|(k, v)| (k.to_string(), v.clone())).collect())
+    }
+
+    // =====================================================================
+    // RFC-0001: optional 'end' block delimiter
+    // =====================================================================
+
+    #[test]
+    fn test_rfc0001_bare_end_closes_top_level_dict() {
+        let src = "server:\n  host: localhost\n  port: 8080\nend\n";
+        let doc = decode(src).unwrap();
+        let server = dict_get(&doc, "server").unwrap();
+        assert_eq!(dict_get(server, "host"), Some(&Value::String("localhost".into())));
+        assert_eq!(dict_get(server, "port"), Some(&Value::String("8080".into())));
+    }
+
+    #[test]
+    fn test_rfc0001_bare_end_closes_nested_dict() {
+        let src = "server:\n  host: localhost\n  tls:\n    cert: /etc/ssl/cert.pem\n    mode: 755\n  end\n  port: 8080\nend\n";
+        let doc = decode(src).unwrap();
+        let server = dict_get(&doc, "server").unwrap();
+        let tls = dict_get(server, "tls").unwrap();
+        assert_eq!(dict_get(tls, "cert"), Some(&Value::String("/etc/ssl/cert.pem".into())));
+        assert_eq!(dict_get(tls, "mode"), Some(&Value::String("755".into())));
+        assert_eq!(dict_get(server, "port"), Some(&Value::String("8080".into())));
+    }
+
+    #[test]
+    fn test_rfc0001_end_with_key_closes_named_nested_dict() {
+        let src = "server:\n  host: localhost\n  tls:\n    cert: /etc/ssl/cert.pem\n  end tls\n  port: 8080\nend server\n";
+        let doc = decode(src).unwrap();
+        let server = dict_get(&doc, "server").unwrap();
+        assert_eq!(dict_get(server, "host"), Some(&Value::String("localhost".into())));
+        let tls = dict_get(server, "tls").unwrap();
+        assert_eq!(dict_get(tls, "cert"), Some(&Value::String("/etc/ssl/cert.pem".into())));
+        assert_eq!(dict_get(server, "port"), Some(&Value::String("8080".into())));
+    }
+
+    #[test]
+    fn test_rfc0001_bare_end_closes_list_block() {
+        let src = "servers:\n  - host: a\n    port: 80\n  - host: b\n    port: 81\nend\n";
+        let doc = decode(src).unwrap();
+        let servers = dict_get(&doc, "servers").unwrap().as_list().unwrap();
+        assert_eq!(servers.len(), 2);
+        assert_eq!(dict_get(&servers[0], "host"), Some(&Value::String("a".into())));
+        assert_eq!(dict_get(&servers[1], "host"), Some(&Value::String("b".into())));
+    }
+
+    #[test]
+    fn test_rfc0001_bare_end_equivalent_to_dedent() {
+        let with_end = "a: 1\nb: 2\nend\n";
+        let without_end = "a: 1\nb: 2\n";
+        let doc_with = decode(with_end).unwrap();
+        let doc_without = decode(without_end).unwrap();
+        assert_eq!(doc_with, doc_without);
+    }
+
+    #[test]
+    fn test_rfc0001_end_key_mismatch_throws() {
+        let src = "server:\n  host: localhost\n  port: 8080\nend tls\n";
+        let err = decode(src).unwrap_err();
+        assert!(err.message.contains("end-key mismatch"), "expected end-key mismatch, got: {}", err.message);
+    }
+
+    #[test]
+    fn test_rfc0001_bare_end_on_root_allowed() {
+        let src = "a: 1\nend\n";
+        let doc = decode(src).unwrap();
+        assert_eq!(dict_get(&doc, "a"), Some(&Value::String("1".into())));
+    }
+
+    #[test]
+    fn test_rfc0001_end_as_dict_key_allowed() {
+        // 'end' as a dict key is just a regular identifier, not a delimiter.
+        let src = "end: 1\nend2: 2\n";
+        let doc = decode(src).unwrap();
+        assert_eq!(dict_get(&doc, "end"), Some(&Value::String("1".into())));
+        assert_eq!(dict_get(&doc, "end2"), Some(&Value::String("2".into())));
+    }
+
+    #[test]
+    fn test_rfc0001_end_inside_multiline_block_is_literal() {
+        let src = "script: |\n  echo \"end of script\"\n|\n";
+        let doc = decode(src).unwrap();
+        assert_eq!(dict_get(&doc, "script"), Some(&Value::String("echo \"end of script\"".into())));
+    }
+
+    #[test]
+    fn test_rfc0001_deeply_nested_end_chains() {
+        let src = "a:\n  b:\n    c:\n      d: 1\n    end c\n  end b\nend a\ne: 2\n";
+        let doc = decode(src).unwrap();
+        let a = dict_get(&doc, "a").unwrap();
+        let b = dict_get(a, "b").unwrap();
+        let c = dict_get(b, "c").unwrap();
+        assert_eq!(dict_get(c, "d"), Some(&Value::String("1".into())));
+        assert_eq!(dict_get(&doc, "e"), Some(&Value::String("2".into())));
+    }
+
+    #[test]
+    fn test_rfc0001_end_allows_sibling_content_after() {
+        let src = "server:\n  host: a\nend server\nproxy:\n  host: b\nend proxy\n";
+        let doc = decode(src).unwrap();
+        let server = dict_get(&doc, "server").unwrap();
+        let proxy = dict_get(&doc, "proxy").unwrap();
+        assert_eq!(dict_get(server, "host"), Some(&Value::String("a".into())));
+        assert_eq!(dict_get(proxy, "host"), Some(&Value::String("b".into())));
+    }
+
+    #[test]
+    fn test_rfc0001_root_end_with_complex_dict() {
+        let src = "server:\n  host: localhost\n  tls:\n    cert: /etc/ssl/cert.pem\n  end tls\n  port: 8080\nend server\nname: production\n";
+        let doc = decode(src).unwrap();
+        let server = dict_get(&doc, "server").unwrap();
+        assert_eq!(dict_get(server, "host"), Some(&Value::String("localhost".into())));
+        let tls = dict_get(server, "tls").unwrap();
+        assert_eq!(dict_get(tls, "cert"), Some(&Value::String("/etc/ssl/cert.pem".into())));
+        assert_eq!(dict_get(server, "port"), Some(&Value::String("8080".into())));
+        assert_eq!(dict_get(&doc, "name"), Some(&Value::String("production".into())));
+    }
+
+    // =====================================================================
+    // RFC-0002: inline object / array literals
+    // =====================================================================
+
+    #[test]
+    fn test_rfc0002_inline_object_as_list_item() {
+        let src = "servers:\n  - {host: a, port: 80}\n  - {host: b, port: 81}\n";
+        let doc = decode(src).unwrap();
+        let servers = dict_get(&doc, "servers").unwrap().as_list().unwrap();
+        assert_eq!(servers.len(), 2);
+        assert_eq!(dict_get(&servers[0], "host"), Some(&Value::String("a".into())));
+        assert_eq!(dict_get(&servers[0], "port"), Some(&Value::String("80".into())));
+        assert_eq!(dict_get(&servers[1], "host"), Some(&Value::String("b".into())));
+        assert_eq!(dict_get(&servers[1], "port"), Some(&Value::String("81".into())));
+    }
+
+    #[test]
+    fn test_rfc0002_inline_object_with_quoted_value() {
+        let src = "servers:\n  - {host: \"my host\", port: 80}\n";
+        let doc = decode(src).unwrap();
+        let servers = dict_get(&doc, "servers").unwrap().as_list().unwrap();
+        assert_eq!(dict_get(&servers[0], "host"), Some(&Value::String("my host".into())));
+        assert_eq!(dict_get(&servers[0], "port"), Some(&Value::String("80".into())));
+    }
+
+    #[test]
+    fn test_rfc0002_inline_object_with_tagged_values() {
+        let src = "cfg:\n  - {port: !n 8080, mode: !o 755, color: !xb FF00AA}\n";
+        let doc = decode(src).unwrap();
+        let cfg = dict_get(&doc, "cfg").unwrap().as_list().unwrap();
+        assert_eq!(dict_get(&cfg[0], "port"), Some(&Value::Int(8080)));
+        let mode = dict_get(&cfg[0], "mode").unwrap();
+        assert_eq!(mode, &Value::Tagged(crate::Tagged { tag: "o".into(), value: "755".into() }));
+        let color = dict_get(&cfg[0], "color").unwrap();
+        assert_eq!(color, &Value::Bytes(vec![0xff, 0x00, 0xaa]));
+    }
+
+    #[test]
+    fn test_rfc0002_inline_object_with_empty_value() {
+        let src = "cfg:\n  - {name: \"\"}\n  - {empty:}\n";
+        let doc = decode(src).unwrap();
+        let cfg = dict_get(&doc, "cfg").unwrap().as_list().unwrap();
+        assert_eq!(dict_get(&cfg[0], "name"), Some(&Value::String(String::new())));
+        assert_eq!(dict_get(&cfg[1], "empty"), Some(&Value::String(String::new())));
+    }
+
+    #[test]
+    fn test_rfc0002_compact_array_of_inline_objects_no_tag() {
+        let src = "peers: [{host: a, port: 80}, {host: b, port: 81}]\n";
+        let doc = decode(src).unwrap();
+        let peers = dict_get(&doc, "peers").unwrap().as_list().unwrap();
+        assert_eq!(peers.len(), 2);
+        assert_eq!(dict_get(&peers[0], "host"), Some(&Value::String("a".into())));
+        assert_eq!(dict_get(&peers[1], "host"), Some(&Value::String("b".into())));
+    }
+
+    #[test]
+    fn test_rfc0002_compact_tagged_array_of_inline_objects() {
+        let src = "items: !o[{a: 1, b: 2}, {c: 3}]\n";
+        let doc = decode(src).unwrap();
+        let items = dict_get(&doc, "items").unwrap().as_list().unwrap();
+        assert_eq!(items.len(), 2);
+        assert_eq!(dict_get(&items[0], "a"), Some(&Value::String("1".into())));
+        assert_eq!(dict_get(&items[0], "b"), Some(&Value::String("2".into())));
+        assert_eq!(dict_get(&items[1], "c"), Some(&Value::String("3".into())));
+    }
+
+    #[test]
+    fn test_rfc0002_mix_block_and_inline_list_items() {
+        let src = "servers:\n  - {host: a, port: 80}\n  - host: b\n    port: 81\n    tls: enabled\n";
+        let doc = decode(src).unwrap();
+        let servers = dict_get(&doc, "servers").unwrap().as_list().unwrap();
+        assert_eq!(servers.len(), 2);
+        assert_eq!(dict_get(&servers[0], "host"), Some(&Value::String("a".into())));
+        assert_eq!(dict_get(&servers[1], "host"), Some(&Value::String("b".into())));
+        assert_eq!(dict_get(&servers[1], "tls"), Some(&Value::String("enabled".into())));
+    }
+
+    #[test]
+    fn test_rfc0002_empty_inline_object() {
+        let src = "cfg:\n  - {}\n";
+        let doc = decode(src).unwrap();
+        let cfg = dict_get(&doc, "cfg").unwrap().as_list().unwrap();
+        assert_eq!(cfg[0], Value::Dict(vec![]));
+    }
+
+    #[test]
+    fn test_rfc0002_inline_object_in_nested_block() {
+        let src = "data:\n  items:\n    - {id: 1, name: alice}\n    - {id: 2, name: bob}\n";
+        let doc = decode(src).unwrap();
+        let data = dict_get(&doc, "data").unwrap();
+        let items = dict_get(data, "items").unwrap().as_list().unwrap();
+        assert_eq!(items.len(), 2);
+        assert_eq!(dict_get(&items[0], "id"), Some(&Value::String("1".into())));
+        assert_eq!(dict_get(&items[0], "name"), Some(&Value::String("alice".into())));
+        assert_eq!(dict_get(&items[1], "id"), Some(&Value::String("2".into())));
+        assert_eq!(dict_get(&items[1], "name"), Some(&Value::String("bob".into())));
+    }
+
+    #[test]
+    fn test_rfc0002_duplicate_keys_in_inline_object_throws() {
+        let src = "cfg:\n  - {a: 1, a: 2}\n";
+        let err = decode(src).unwrap_err();
+        assert!(err.message.contains("duplicate key 'a'"), "expected duplicate-key error, got: {}", err.message);
+    }
+
+    #[test]
+    fn test_rfc0002_malformed_inline_object_throws() {
+        let src = "cfg:\n  - {a, b: 2}\n";
+        assert!(decode(src).is_err());
+    }
+
+    #[test]
+    fn test_rfc0002_inline_object_preserves_key_order() {
+        let src = "cfg:\n  - {z: 1, a: 2, m: 3}\n";
+        let doc = decode(src).unwrap();
+        let cfg = dict_get(&doc, "cfg").unwrap().as_list().unwrap();
+        let keys: Vec<&str> = cfg[0].as_dict().unwrap().iter().map(|(k, _)| k.as_str()).collect();
+        assert_eq!(keys, vec!["z", "a", "m"]);
+    }
+
+    #[test]
+    fn test_rfc0002_nested_compact_array_in_inline_object() {
+        let src = "cfg:\n  - {tags: !s[a, b, c], port: !n 80}\n";
+        let doc = decode(src).unwrap();
+        let cfg = dict_get(&doc, "cfg").unwrap().as_list().unwrap();
+        let tags = dict_get(&cfg[0], "tags").unwrap().as_list().unwrap();
+        assert_eq!(tags.len(), 3);
+        assert_eq!(tags[0], Value::String("a".into()));
+        assert_eq!(dict_get(&cfg[0], "port"), Some(&Value::Int(80)));
+    }
+
+    #[test]
+    fn test_rfc0002_traditional_block_list_regression() {
+        let src = "items:\n  - one\n  - two\n";
+        let doc = decode(src).unwrap();
+        let items = dict_get(&doc, "items").unwrap().as_list().unwrap();
+        assert_eq!(items, &vec![Value::String("one".into()), Value::String("two".into())]);
+    }
+
+    #[test]
+    fn test_rfc0002_traditional_compact_array_regression() {
+        let src = "ports: !n[80, 443, 8080]\n";
+        let doc = decode(src).unwrap();
+        let ports = dict_get(&doc, "ports").unwrap().as_list().unwrap();
+        assert_eq!(ports.len(), 3);
+        assert_eq!(ports[0], Value::Int(80));
+        assert_eq!(ports[1], Value::Int(443));
+        assert_eq!(ports[2], Value::Int(8080));
+    }
+
+    #[test]
+    fn test_rfc0002_end_as_inline_object_value() {
+        // 'end' as a key inside { ... } must not be confused with the block-close keyword
+        let src = "cfg:\n  - {end: foo, value: 1}\n";
+        let doc = decode(src).unwrap();
+        let cfg = dict_get(&doc, "cfg").unwrap().as_list().unwrap();
+        assert_eq!(dict_get(&cfg[0], "end"), Some(&Value::String("foo".into())));
+        assert_eq!(dict_get(&cfg[0], "value"), Some(&Value::String("1".into())));
+    }
+
+    #[test]
+    fn test_rfc0002_inline_object_with_complex_tagged_values() {
+        let src = "cfg:\n  - {name: !s hello, uid: !i 42, ratio: !f 3.14, kind: !o 0644, addr: !ip 10.0.0.1}\n";
+        let doc = decode(src).unwrap();
+        let cfg = dict_get(&doc, "cfg").unwrap().as_list().unwrap();
+        assert_eq!(dict_get(&cfg[0], "name"), Some(&Value::String("hello".into())));
+        assert_eq!(dict_get(&cfg[0], "uid"), Some(&Value::Int(42)));
+        assert_eq!(dict_get(&cfg[0], "ratio"), Some(&Value::Float(3.14)));
+        assert_eq!(
+            dict_get(&cfg[0], "kind"),
+            Some(&Value::Tagged(crate::Tagged { tag: "o".into(), value: "0644".into() }))
+        );
+        // !ip is parsed as a string body in the current pipeline
+        let addr = dict_get(&cfg[0], "addr").unwrap();
+        assert!(matches!(addr, Value::Tagged(_)));
+    }
+
+    #[test]
+    fn inline_dict_entries_in_lists() {
+        assert_eq!(
+            decode("a:\n  - x: 1\n  - y: 2").unwrap(),
+            dict_of(&[(
+                "a",
+                Value::List(vec![
+                    dict_of(&[("x", Value::String("1".into()))]),
+                    dict_of(&[("y", Value::String("2".into()))])
+                ])
+            )])
+        );
+        assert_eq!(
+            decode("a:\n  - x: 1\n    y: 2\n  - z: 3").unwrap(),
+            dict_of(&[(
+                "a",
+                Value::List(vec![
+                    dict_of(&[
+                        ("x", Value::String("1".into())),
+                        ("y", Value::String("2".into()))
+                    ]),
+                    dict_of(&[("z", Value::String("3".into()))])
+                ])
+            )])
+        );
+        assert_eq!(
+            decode("a:\n  - x: 1\n  - simple").unwrap(),
+            dict_of(&[(
+                "a",
+                Value::List(vec![
+                    dict_of(&[("x", Value::String("1".into()))]),
+                    Value::String("simple".into())
+                ])
+            )])
+        );
+        assert!(decode("a: !n[]\n  - x: 1\n").is_err());
+    }
+
+    #[test]
+    fn multiline_chomp_indicators() {
+        assert_eq!(decode("a: |\n  x\n|").unwrap().as_dict().unwrap()[0].1, Value::String("x".into()));
+        assert_eq!(decode("a: |-\n  x\n\n|").unwrap().as_dict().unwrap()[0].1, Value::String("x".into()));
+        assert_eq!(
+            decode("a: |-\n  x\n  y\n|").unwrap().as_dict().unwrap()[0].1,
+            Value::String("x\ny".into())
+        );
+        assert_eq!(
+            decode("a: |+\n  x\n|").unwrap().as_dict().unwrap()[0].1,
+            Value::String("x\n".into())
+        );
+        assert_eq!(
+            decode("a: |\n  x\n\n|").unwrap().as_dict().unwrap()[0].1,
+            Value::String("x\n".into())
+        );
+        assert_eq!(
+            decode("a: |MD-\n  x\n\nMD").unwrap().as_dict().unwrap()[0].1,
+            Value::String("x".into())
+        );
+        assert_eq!(
+            decode("t: |\n  a # not comment\n| # comment").unwrap().as_dict().unwrap()[0].1,
+            Value::String("a # not comment".into())
+        );
+    }
+
+    #[test]
+    fn strings_that_reparse_as_structure_are_quoted_or_tagged() {
+        assert_eq!(
+            encode(&dict_a(Value::String("hello: world".into()))).unwrap(),
+            "a: \"hello: world\"\n"
+        );
+        let enc = encode(&dict_a(Value::String("hello: world".into()))).unwrap();
+        assert_eq!(parse(&enc).unwrap(), dict_a(Value::String("hello: world".into())));
+        let items = Value::Dict(vec![(
+            "items".into(),
+            Value::List(vec![Value::String("a: b".into())]),
+        )]);
+        assert_eq!(encode(&items).unwrap(), "items:\n  - \"a: b\"\n");
+        assert_eq!(parse("items:\n  - \"a: b\"\n").unwrap(), items);
     }
 }
