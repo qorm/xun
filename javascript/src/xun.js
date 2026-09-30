@@ -359,6 +359,11 @@ class Parser {
         if (itemTag) {
           throw new XunError(`!${itemTag}[] cannot contain dictionary entries`, l.n, 1, l.raw);
         }
+        // RFC-0002: inline object literal {key: value, ...} as a list item
+        if (rest.trim().startsWith("{")) {
+          arr.push(parseInlineDict(rest, l.n, l.raw));
+          continue;
+        }
         arr.push(this.parseInlineDictEntry(rest, indent + 2, l.n, l.raw, depth + 1));
         continue;
       }
@@ -411,6 +416,20 @@ class Parser {
       return this.parseTagged(raw, parentIndent, lineNo, sourceLine, depth, valueKey);
     }
 
+    // RFC-0002: untagged compact array of inline objects: [{...}, {...}]
+    if (raw.startsWith("[") && raw.endsWith("]") && raw !== "[]") {
+      const inner = raw.slice(1, -1);
+      const pieces = splitTopLevelCommas(inner, lineNo, sourceLine);
+      const hasObjects = pieces.some((p) => p.trim().startsWith("{"));
+      if (hasObjects) {
+        return pieces.map((piece) => {
+          const t = piece.trim();
+          if (t.startsWith("{")) return parseInlineDict(t, lineNo, sourceLine);
+          return t;
+        });
+      }
+    }
+
     if (raw === "") {
       // RFC-0001: nested block — header at parentIndent, named valueKey.
       this.openBlocks.push({ indent: parentIndent, key: valueKey });
@@ -454,6 +473,16 @@ class Parser {
         } finally {
           this.openBlocks.pop();
         }
+      }
+      // RFC-0002: detect inline object elements {key: val, ...} within compact arrays.
+      const pieces = splitTopLevelCommas(inner, lineNo, sourceLine);
+      const hasObjects = pieces.some((p) => p.trim().startsWith("{"));
+      if (hasObjects) {
+        return pieces.map((piece) => {
+          const t = piece.trim();
+          if (t.startsWith("{")) return parseInlineDict(t, lineNo, sourceLine);
+          return applyTag(tag, t, lineNo, sourceLine);
+        });
       }
       return splitCompact(inner).map((g) => applyTag(tag, g, lineNo, sourceLine));
     }
@@ -572,6 +601,108 @@ function splitKey(text, n, sourceLine) {
   throw new XunError("expected ': ' or trailing ':'", n, 1, sourceLine);
 }
 
+// RFC-0002: split a string by top-level commas, respecting brace and quote nesting.
+function splitTopLevelCommas(inner, lineNo, sourceLine) {
+  const out = [];
+  let start = 0, brace = 0, bracket = 0, inQuote = false, escape = false;
+  for (let i = 0; i < inner.length; i++) {
+    const c = inner[i];
+    if (escape) { escape = false; continue; }
+    if (inQuote) {
+      if (c === "\\") { escape = true; continue; }
+      if (c === '"') { inQuote = false; }
+      continue;
+    }
+    if (c === '"') { inQuote = true; continue; }
+    if (c === "{") { brace++; continue; }
+    if (c === "}") { brace--; continue; }
+    if (c === "[") { bracket++; continue; }
+    if (c === "]") { bracket--; continue; }
+    if (c === "," && brace === 0 && bracket === 0) {
+      out.push(inner.slice(start, i));
+      start = i + 1;
+    }
+  }
+  const last = inner.slice(start);
+  if (last.trim().length > 0) out.push(last);
+  return out;
+}
+
+// RFC-0002: parse inline object literal {key: value, key2: value2}.
+function parseInlineDict(text, lineNo, sourceLine) {
+  const trimmed = text.trim();
+  if (!trimmed.startsWith("{") || !trimmed.endsWith("}")) {
+    throw new XunError("inline object must be wrapped in '{...}'", lineNo, 1, sourceLine);
+  }
+  const inner = trimmed.slice(1, -1);
+  if (inner.trim() === "") return {};
+  const pieces = splitTopLevelCommas(inner, lineNo, sourceLine);
+  const obj = {};
+  for (const piece of pieces) {
+    const t = piece.trim();
+    if (!t) continue;
+    // Find top-level key separator ": " (or trailing ":" at end).
+    let inQuote = false, escape = false, foundIdx = -1;
+    for (let i = 0; i < t.length; i++) {
+      const c = t[i];
+      if (escape) { escape = false; continue; }
+      if (inQuote) {
+        if (c === "\\") { escape = true; continue; }
+        if (c === '"') { inQuote = false; }
+        continue;
+      }
+      if (c === '"') { inQuote = true; continue; }
+      if (c === ":") {
+        // Trailing ":" separator (key with no value)
+        if (i === t.length - 1) { foundIdx = i; break; }
+        // ": " separator (key: value) — require the next char to be a space
+        if (i + 1 < t.length && t[i + 1] === " ") { foundIdx = i; break; }
+      }
+    }
+    if (foundIdx === -1) {
+      throw new XunError(`inline object entry missing ': ' separator: '${t}'`, lineNo, 1, sourceLine);
+    }
+    let keyRaw = t.slice(0, foundIdx).trim();
+    let rest = t.slice(foundIdx + 1).trim();
+    if (keyRaw.startsWith('"')) {
+      const { value: key, end } = parseQuotedPrefix(keyRaw, lineNo, sourceLine);
+      keyRaw = key;
+      // Anything in keyRaw after end is part of rest — already sliced above
+    }
+    if (!keyRaw) throw new XunError(`empty key in inline object`, lineNo, 1, sourceLine);
+    if (Object.prototype.hasOwnProperty.call(obj, keyRaw)) {
+      throw new XunError(`duplicate key '${keyRaw}'`, lineNo, 1, sourceLine);
+    }
+    let value;
+    if (rest === "") {
+      value = "";
+    } else if (rest.startsWith('"')) {
+      value = parseQuotedString(rest, lineNo, sourceLine);
+    } else if (rest.startsWith("!")) {
+      const tm = rest.match(/^!([A-Za-z_][A-Za-z0-9_]*)(.*)$/);
+      if (!tm) throw new XunError(`invalid tag in inline object: '${rest}'`, lineNo, 1, sourceLine);
+      const tag = tm[1];
+      const tail = tm[2];
+      if (tail === "") throw new XunError(`missing value for !${tag}`, lineNo, 1, sourceLine);
+      if (tail.startsWith(" ")) {
+        value = applyTag(tag, tail.slice(1), lineNo, sourceLine);
+      } else if (tail.startsWith("[")) {
+        // Compact tag array inside inline object: e.g. ports: !n[80, 443]
+        if (!tail.endsWith("]")) throw new XunError(`unclosed compact array in inline object`, lineNo, 1, sourceLine);
+        const compactInner = tail.slice(1, -1);
+        if (compactInner === "") value = [];
+        else value = splitCompact(compactInner).map((g) => applyTag(tag, g, lineNo, sourceLine));
+      } else {
+        throw new XunError(`expected space or '[' after type tag in inline object`, lineNo, 1, sourceLine);
+      }
+    } else {
+      value = rest;
+    }
+    obj[keyRaw] = value;
+  }
+  return obj;
+}
+
 function matchMultiline(raw) {
   if (raw === "|") return { tag: null, closer: "|", chomp: "exact" };
   if (raw === "|-") return { tag: null, closer: "|", chomp: "strip" };
@@ -586,6 +717,8 @@ function matchMultiline(raw) {
 
 function looksLikeDictEntry(s) {
   if (!s || s.startsWith("!") || s.startsWith('"') || s.startsWith("|")) return false;
+  // RFC-0002: inline object literal {key: val, ...} counts as a dict entry
+  if (s.startsWith("{")) return true;
   return s.includes(": ") || (s.endsWith(":") && s.length > 1);
 }
 
