@@ -88,6 +88,25 @@ export class Tagged {
     return this.value;
   }
 
+  toNumber() {
+    if (this.tag === "o") {
+      if (!/^[0-7]+$/.test(this.value)) throw new XunError(`invalid octal: ${this.value}`);
+      return parseInt(this.value, 8);
+    }
+    if (this.tag === "x") {
+      const s = this.value.replace(/_/g, "");
+      if (!/^[0-9A-Fa-f]+$/.test(s)) throw new XunError(`invalid hex: ${this.value}`);
+      return parseInt(s, 16);
+    }
+    if (this.tag === "unix") {
+      return parseUnix(this.value, 0, "");
+    }
+    if (this.tag === "n" || this.tag === "i" || this.tag === "f") {
+      return Number(this.value.replace(/_/g, ""));
+    }
+    throw new XunError(`cannot convert !${this.tag} to number`);
+  }
+
   toChar() {
     if (this.tag !== "c") {
       throw new XunError(`cannot convert !${this.tag} to char`);
@@ -126,15 +145,16 @@ export function parseSize(s) {
 
 export function parseDuration(s) {
   if (!s) throw new XunError("empty duration string");
-  const m = s.match(/^(?:(\d+)d)?(?:(\d+)h)?(?:(\d+)m)?(?:(\d+(?:\.\d+)?)s)?$/);
-  if (!m || (!m[1] && !m[2] && !m[3] && !m[4])) {
+  const m = s.match(/^(?:(\d+)d)?(?:(\d+)h)?(?:(\d+)m)?(?:(\d+(?:\.\d+)?)s)?(?:(\d+(?:\.\d+)?)ms)?$/);
+  if (!m || (!m[1] && !m[2] && !m[3] && !m[4] && !m[5])) {
     throw new XunError(`invalid duration format: "${s}"`);
   }
   const days = parseInt(m[1] || "0", 10);
   const hours = parseInt(m[2] || "0", 10);
   const minutes = parseInt(m[3] || "0", 10);
   const seconds = parseFloat(m[4] || "0");
-  return days * 86400 + hours * 3600 + minutes * 60 + seconds;
+  const millis = parseFloat(m[5] || "0");
+  return days * 86400 + hours * 3600 + minutes * 60 + seconds + millis / 1000;
 }
 
 export function parseVersion(s) {
@@ -152,6 +172,7 @@ export function unpack(v) {
     if (v.tag === "ip") return v.toIP();
     if (v.tag === "uuid") return v.toUUID();
     if (v.tag === "c") return v.toChar();
+    if (v.tag === "o" || v.tag === "x" || v.tag === "unix") return v.toNumber();
     return v.value;
   }
   if (Array.isArray(v)) {
@@ -218,13 +239,15 @@ function makeLine(raw, n) {
     throw new XunError(`indent must be a multiple of 2, got ${i} spaces`, n, i + 1, raw);
   }
   const text = raw.slice(i).replace(/[ \t]+$/, "");
-  return { raw, indent: i, text, n, blank: text.length === 0 };
+  const code = stripTrailingComment(text);
+  return { raw, indent: i, text, code, n, blank: text.length === 0 };
 }
 
 class Parser {
   constructor(lines) {
     this.lines = lines;
     this.i = 0;
+    this.openBlocks = []; // RFC-0001: stack of {indent, key} for 'end' validation
   }
 
   peek() {
@@ -234,9 +257,35 @@ class Parser {
   skipNoise() {
     while (this.peek()) {
       const l = this.peek();
-      if (l.blank || l.text.startsWith("#")) this.i++;
+      if (l.blank || l.code.length === 0) this.i++;
       else break;
     }
+  }
+
+  // RFC-0001: try to consume an 'end' or 'end <key>' statement at given indent.
+  // Returns true if consumed, false if not an end statement.
+  // expectedKey: the key of the immediately enclosing dict (null for root).
+  tryConsumeEnd(indent, expectedKey) {
+    const l = this.peek();
+    if (!l || l.blank || l.indent !== indent) return false;
+    const code = l.code;
+    if (code === "end") {
+      this.i++;
+      return true;
+    }
+    const m = code.match(/^end\s+(\S+)$/);
+    if (m) {
+      const endKey = m[1];
+      if (expectedKey !== null && expectedKey !== endKey) {
+        throw new XunError(
+          `end-key mismatch: expected '${expectedKey}', got '${endKey}'`,
+          l.n, l.indent + 1, l.raw
+        );
+      }
+      this.i++;
+      return true;
+    }
+    return false;
   }
 
   parseDocument() {
@@ -249,10 +298,19 @@ class Parser {
     if (this.isListItem(first)) {
       throw new XunError("root must be a dictionary", first.n, 1, first.raw);
     }
-    return this.parseDict(0, 0);
+    // RFC-0001: track root block so trailing 'end' can close it.
+    this.openBlocks.push({ indent: 0, key: null });
+    try {
+      const obj = this.parseDict(0, 0, null);
+      this.skipNoise();
+      this.tryConsumeEnd(0, null);
+      return obj;
+    } finally {
+      this.openBlocks.pop();
+    }
   }
 
-  parseDict(indent, depth) {
+  parseDict(indent, depth, dictKey = null) {
     if (depth > MAX_DEPTH) throw new XunError("nesting exceeds 64", this.peek()?.n);
     const obj = {};
     while (this.peek()) {
@@ -263,20 +321,25 @@ class Parser {
       if (l.indent > indent) {
         throw new XunError(`invalid indent jump from ${indent} to ${l.indent}`, l.n, l.indent + 1, l.raw);
       }
+      // RFC-0001: 'end' at body indent stops the dict (caller validates via tryConsumeEnd).
+      // Only valid at indent 0 (root); for nested dicts this is malformed but we tolerate.
+      if (l.code === "end" || l.code.startsWith("end ")) {
+        break;
+      }
       if (this.isListItem(l)) {
         throw new XunError("cannot mix list items into a dictionary", l.n, 1, l.raw);
       }
-      const { key, rest } = splitKey(l.text, l.n, l.raw);
+      const { key, rest } = splitKey(l.code, l.n, l.raw);
       if (Object.prototype.hasOwnProperty.call(obj, key)) {
         throw new XunError(`duplicate key '${key}'`, l.n, 1, l.raw);
       }
       this.i++;
-      obj[key] = this.parseValue(rest, indent, l.n, l.raw, depth + 1);
+      obj[key] = this.parseValue(rest, indent, l.n, l.raw, depth + 1, key);
     }
     return obj;
   }
 
-  parseList(indent, depth, itemTag = null) {
+  parseList(indent, depth, itemTag = null, parentKey = null) {
     if (depth > MAX_DEPTH) throw new XunError("nesting exceeds 64", this.peek()?.n);
     const arr = [];
     while (this.peek()) {
@@ -285,11 +348,20 @@ class Parser {
       if (!l || l.blank) break;
       if (l.indent < indent) break;
       if (l.indent > indent) throw new XunError(`invalid indent jump from ${indent} to ${l.indent}`, l.n, l.indent + 1, l.raw);
+      // RFC-0001: 'end' at list level stops the list.
+      if (l.code === "end" || l.code.startsWith("end ")) break;
       if (!this.isListItem(l)) {
         throw new XunError("cannot mix dictionary keys into a list", l.n, 1, l.raw);
       }
-      const rest = l.text === "-" ? "" : l.text.slice(2);
+      const rest = l.code === "-" ? "" : l.code.slice(2);
       this.i++;
+      if (looksLikeDictEntry(rest)) {
+        if (itemTag) {
+          throw new XunError(`!${itemTag}[] cannot contain dictionary entries`, l.n, 1, l.raw);
+        }
+        arr.push(this.parseInlineDictEntry(rest, indent + 2, l.n, l.raw, depth + 1));
+        continue;
+      }
       let val = this.parseValue(rest, indent, l.n, l.raw, depth + 1);
       if (itemTag) val = applyTag(itemTag, glyphOf(val), l.n, l.raw);
       arr.push(val);
@@ -297,23 +369,59 @@ class Parser {
     return arr;
   }
 
-  isListItem(l) {
-    return l.text === "-" || l.text.startsWith("- ");
+  parseInlineDictEntry(first, keyIndent, lineNo, sourceLine, depth) {
+    const obj = {};
+    const firstParsed = splitKey(first, lineNo, sourceLine);
+    if (Object.prototype.hasOwnProperty.call(obj, firstParsed.key)) {
+      throw new XunError(`duplicate key '${firstParsed.key}'`, lineNo, 1, sourceLine);
+    }
+    obj[firstParsed.key] = this.parseValue(firstParsed.rest, keyIndent, lineNo, sourceLine, depth + 1);
+    while (this.peek()) {
+      this.skipNoise();
+      const l = this.peek();
+      if (!l || l.blank) break;
+      if (l.indent < keyIndent) break;
+      if (l.indent > keyIndent) {
+        throw new XunError(`invalid indent jump from ${keyIndent} to ${l.indent}`, l.n, l.indent + 1, l.raw);
+      }
+      if (this.isListItem(l)) break;
+      const { key, rest } = splitKey(l.text, l.n, l.raw);
+      if (Object.prototype.hasOwnProperty.call(obj, key)) {
+        throw new XunError(`duplicate key '${key}'`, l.n, 1, l.raw);
+      }
+      this.i++;
+      obj[key] = this.parseValue(rest, keyIndent, l.n, l.raw, depth + 1);
+    }
+    return obj;
   }
 
-  parseValue(raw, parentIndent, lineNo, sourceLine, depth) {
+  isListItem(l) {
+    return l.code === "-" || l.code.startsWith("- ");
+  }
+
+  parseValue(raw, parentIndent, lineNo, sourceLine, depth, valueKey = null) {
+    raw = stripTrailingComment(raw);
     if (raw === "[]") return [];
     if (raw === "{}") return {};
 
     const ml = matchMultiline(raw);
-    if (ml) return this.readMultiline(parentIndent, ml.tag, ml.closer, lineNo, sourceLine);
+    if (ml) return this.readMultiline(parentIndent, ml.tag, ml.closer, ml.chomp, lineNo, sourceLine);
 
     if (raw.startsWith("!")) {
-      return this.parseTagged(raw, parentIndent, lineNo, sourceLine, depth);
+      return this.parseTagged(raw, parentIndent, lineNo, sourceLine, depth, valueKey);
     }
 
     if (raw === "") {
-      return this.parseEmptyOrNested(parentIndent, lineNo, sourceLine, depth, null);
+      // RFC-0001: nested block — header at parentIndent, named valueKey.
+      this.openBlocks.push({ indent: parentIndent, key: valueKey });
+      try {
+        const result = this.parseEmptyOrNested(parentIndent, lineNo, sourceLine, depth, null, valueKey);
+        this.skipNoise();
+        this.tryConsumeEnd(parentIndent, valueKey);
+        return result;
+      } finally {
+        this.openBlocks.pop();
+      }
     }
 
     if (raw.startsWith('"')) {
@@ -323,7 +431,7 @@ class Parser {
     return raw;
   }
 
-  parseTagged(raw, parentIndent, lineNo, sourceLine, depth) {
+  parseTagged(raw, parentIndent, lineNo, sourceLine, depth, valueKey = null) {
     const m = raw.match(/^!([A-Za-z_][A-Za-z0-9_]*)(.*)$/);
     if (!m) throw new XunError("invalid type tag", lineNo, 1, sourceLine);
     const tag = m[1];
@@ -336,7 +444,16 @@ class Parser {
       if (!rest.endsWith("]")) throw new XunError("unclosed compact array", lineNo, 1, sourceLine);
       const inner = rest.slice(1, -1);
       if (inner.length === 0) {
-        return this.parseEmptyOrNested(parentIndent, lineNo, sourceLine, depth, tag);
+        // RFC-0001: track tagged block for 'end' validation
+        this.openBlocks.push({ indent: parentIndent, key: valueKey });
+        try {
+          const result = this.parseEmptyOrNested(parentIndent, lineNo, sourceLine, depth, tag, valueKey);
+          this.skipNoise();
+          this.tryConsumeEnd(parentIndent, valueKey);
+          return result;
+        } finally {
+          this.openBlocks.pop();
+        }
       }
       return splitCompact(inner).map((g) => applyTag(tag, g, lineNo, sourceLine));
     }
@@ -350,7 +467,7 @@ class Parser {
     const body = rest.slice(1);
     const ml = matchMultiline(body);
     if (ml) {
-      const text = this.readMultiline(parentIndent, ml.tag, ml.closer, lineNo, sourceLine);
+      const text = this.readMultiline(parentIndent, ml.tag, ml.closer, ml.chomp, lineNo, sourceLine);
       if (tag === "s") return text;
       return applyTag(tag, text, lineNo, sourceLine);
     }
@@ -358,7 +475,7 @@ class Parser {
     return applyTag(tag, body, lineNo, sourceLine);
   }
 
-  parseEmptyOrNested(parentIndent, lineNo, sourceLine, depth, itemTag) {
+  parseEmptyOrNested(parentIndent, lineNo, sourceLine, depth, itemTag, valueKey = null) {
     this.skipNoise();
     const n = this.peek();
     const child = parentIndent + 2;
@@ -367,12 +484,12 @@ class Parser {
       return "";
     }
     if (n.indent !== child) throw new XunError(`child indent must be parent + 2 (${child}), got ${n.indent}`, n.n, 1, n.raw);
-    if (this.isListItem(n)) return this.parseList(child, depth, itemTag);
+    if (this.isListItem(n)) return this.parseList(child, depth, itemTag, valueKey);
     if (itemTag) throw new XunError(`!${itemTag}[] expected list items`, n.n, 1, n.raw);
-    return this.parseDict(child, depth);
+    return this.parseDict(child, depth, valueKey);
   }
 
-  readMultiline(parentIndent, tag, closer, lineNo, sourceLine) {
+  readMultiline(parentIndent, tag, closer, chomp, lineNo, sourceLine) {
     const base = parentIndent + 2;
     const parts = [];
     while (this.peek()) {
@@ -380,9 +497,12 @@ class Parser {
       const stripped = l.raw.replace(/[ \t]+$/, "");
       const content = stripped.replace(/^ +/, "");
       const ind = l.raw.match(/^( *)/)[1].length;
-      if (!l.blank && ind === parentIndent && content === closer) {
+      const closerText = stripTrailingComment(content);
+      if (!l.blank && ind === parentIndent && closerText === closer) {
         this.i++;
         let s = parts.join("\n");
+        if (chomp === "strip") s = s.replace(/\n+$/, "");
+        else if (chomp === "clip" && s.length > 0 && !s.endsWith("\n")) s += "\n";
         if (tag && tag !== "s") return applyTag(tag, s, lineNo, sourceLine);
         return s;
       }
@@ -402,20 +522,71 @@ class Parser {
   }
 }
 
+function parseQuotedPrefix(raw, lineNo, sourceLine = "") {
+  if (!raw.startsWith('"')) {
+    throw new XunError("quoted string must start with '\"'", lineNo, 1, sourceLine);
+  }
+  let out = "";
+  for (let i = 1; i < raw.length; i++) {
+    const ch = raw[i];
+    if (ch === "\\") {
+      if (i + 1 >= raw.length) {
+        throw new XunError("unclosed escape in quoted string", lineNo, 1, sourceLine);
+      }
+      const next = raw[++i];
+      if (next === "\\" || next === '"') out += next;
+      else throw new XunError(`invalid escape \\${next} in quoted string`, lineNo, 1, sourceLine);
+      continue;
+    }
+    if (ch === '"') {
+      return { value: out, end: i + 1 };
+    }
+    out += ch;
+  }
+  throw new XunError("unclosed quoted string", lineNo, 1, sourceLine);
+}
+
 function splitKey(text, n, sourceLine) {
+  if (text.startsWith('"')) {
+    const { value: key, end } = parseQuotedPrefix(text, n, sourceLine);
+    const after = text.slice(end);
+    if (after === ":") return { key, rest: "" };
+    if (after.startsWith(": ")) return { key, rest: after.slice(2) };
+    throw new XunError("expected ': ' or trailing ':' after quoted key", n, 1, sourceLine);
+  }
   const idx = text.indexOf(": ");
-  if (idx > 0) return { key: text.slice(0, idx), rest: text.slice(idx + 2) };
+  if (idx > 0) {
+    const key = text.slice(0, idx);
+    if (key.endsWith(":")) {
+      throw new XunError(`key must not end with ':': '${key}'`, n, 1, sourceLine);
+    }
+    return { key, rest: text.slice(idx + 2) };
+  }
   if (text.endsWith(":") && text.length > 1) {
-    return { key: text.slice(0, -1), rest: "" };
+    const key = text.slice(0, -1);
+    if (key.endsWith(":")) {
+      throw new XunError(`key must not end with ':': '${key}'`, n, 1, sourceLine);
+    }
+    return { key, rest: "" };
   }
   throw new XunError("expected ': ' or trailing ':'", n, 1, sourceLine);
 }
 
 function matchMultiline(raw) {
-  if (raw === "|") return { tag: null, closer: "|" };
-  const m = raw.match(/^\|([A-Za-z_][A-Za-z0-9_]*)$/);
-  if (m) return { tag: null, closer: m[1] };
+  if (raw === "|") return { tag: null, closer: "|", chomp: "exact" };
+  if (raw === "|-") return { tag: null, closer: "|", chomp: "strip" };
+  if (raw === "|+") return { tag: null, closer: "|", chomp: "clip" };
+  const m = raw.match(/^\|([A-Za-z_][A-Za-z0-9_]*)([-+]?)$/);
+  if (m) {
+    const chomp = m[2] === "-" ? "strip" : m[2] === "+" ? "clip" : "exact";
+    return { tag: null, closer: m[1], chomp };
+  }
   return null;
+}
+
+function looksLikeDictEntry(s) {
+  if (!s || s.startsWith("!") || s.startsWith('"') || s.startsWith("|")) return false;
+  return s.includes(": ") || (s.endsWith(":") && s.length > 1);
 }
 
 function glyphOf(v) {
@@ -447,7 +618,7 @@ function applyTag(tag, glyph, n, sourceLine = "") {
   if (tag === "x") {
     const s = stripUnderscores(glyph, n, sourceLine);
     if (!/^[0-9A-Fa-f]+$/.test(s)) throw new XunError("invalid hex", n, 1, sourceLine);
-    return parseInt(s, 16);
+    return new Tagged("x", glyph);
   }
   if (tag === "xb") {
     const s = glyph.replace(/_/g, "");
@@ -462,7 +633,7 @@ function applyTag(tag, glyph, n, sourceLine = "") {
   }
   if (tag === "o") {
     if (!/^[0-7]+$/.test(glyph)) throw new XunError("invalid octal", n, 1, sourceLine);
-    return parseInt(glyph, 8);
+    return new Tagged("o", glyph);
   }
   if (tag === "b") {
     if (glyph === "true") return true;
@@ -490,7 +661,7 @@ function applyTag(tag, glyph, n, sourceLine = "") {
     return new Tagged("tz", glyph);
   }
   if (tag === "du") {
-    if (!glyph || !/^(\d+d)?(\d+h)?(\d+m)?(\d+(\.\d+)?s)?$/.test(glyph)) {
+    if (!glyph || !/^(\d+d)?(\d+h)?(\d+m)?(\d+(\.\d+)?s)?(\d+(\.\d+)?ms)?$/.test(glyph)) {
       throw new XunError("invalid duration", n, 1, sourceLine);
     }
     return new Tagged("du", glyph);
@@ -501,7 +672,10 @@ function applyTag(tag, glyph, n, sourceLine = "") {
     }
     return new Tagged("sz", glyph);
   }
-  if (tag === "unix") return parseUnix(glyph, n, sourceLine);
+  if (tag === "unix") {
+    parseUnix(glyph, n, sourceLine);
+    return new Tagged("unix", glyph);
+  }
   if (tag === "ver") {
     if (!/^\d+(\.\d+)*$/.test(glyph)) throw new XunError("invalid version", n, 1, sourceLine);
     return new Tagged("ver", glyph);
@@ -683,12 +857,25 @@ function encodeListItems(items, depth, out, seen, path) {
   }
 }
 
-function stripSurroundingQuotes(s) {
-  let out = s;
-  while (out.length >= 2 && out.startsWith('"') && out.endsWith('"')) {
-    out = out.slice(1, -1);
+// Strip a trailing ` # ...` comment outside of quoted strings.
+function stripTrailingComment(text) {
+  let inQuote = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (inQuote) {
+      if (ch === "\\") i++;
+      else if (ch === '"') inQuote = false;
+      continue;
+    }
+    if (ch === '"') {
+      inQuote = true;
+      continue;
+    }
+    if (ch === "#" && (i === 0 || text[i - 1] === " " || text[i - 1] === "\t")) {
+      return text.slice(0, i).replace(/[ \t]+$/, "");
+    }
   }
-  return out;
+  return text;
 }
 
 // Glyphs that JavaScript Number() would coerce, plus syntactic specials.
@@ -723,7 +910,17 @@ function parseQuotedString(raw, lineNo, sourceLine = "") {
 }
 
 function needsQuotedGlyph(s) {
-  return s !== s.trim() || s.includes('"') || s.includes("\\");
+  return (
+    s !== s.trim() ||
+    s.includes('"') ||
+    s.includes("\\") ||
+    s.includes(" #") ||
+    s.startsWith("#") ||
+    s.includes(": ") ||
+    (s.endsWith(":") && s.length > 1) ||
+    s === "|" ||
+    s.startsWith("|")
+  );
 }
 
 function quoteGlyph(s) {
@@ -754,7 +951,6 @@ function encodeScalarField(indent, key, v, out, path) {
   if (v === null || v === undefined) {
     out.push(`${indent}${key}:`);
   } else if (typeof v === "string") {
-    v = stripSurroundingQuotes(v);
     if (v.includes("\n") || v.includes("\r")) {
       out.push(`${indent}${key}: |`);
       for (const line of v.split(/\r?\n/)) {
@@ -800,7 +996,6 @@ function encodeScalarListItem(indent, v, out, path) {
   if (v === null || v === undefined) {
     out.push(`${indent}-`);
   } else if (typeof v === "string") {
-    v = stripSurroundingQuotes(v);
     if (v.includes("\n") || v.includes("\r")) {
       out.push(`${indent}- |`);
       for (const line of v.split(/\r?\n/)) {
