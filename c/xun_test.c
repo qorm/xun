@@ -51,7 +51,9 @@ static void test_example(const char *root) {
   expect_int(xun_dict_get(server, "port"), 8080, "port");
   expect_tagged(xun_dict_get(server, "bind"), "ip", "::1", "bind");
   const xun_value *tls = xun_dict_get(server, "tls");
-  expect_int(xun_dict_get(tls, "mode"), 0755, "mode");
+  expect_tagged(xun_dict_get(tls, "mode"), "o", "755", "mode");
+  int64_t mode_n = 0;
+  if (xun_to_int(xun_dict_get(tls, "mode"), &mode_n) != 0 || mode_n != 0755) fail("mode to_int");
   const xun_value *features = xun_dict_get(doc, "features");
   if (!features || features->kind != XUN_LIST || features->u.list.len != 2) fail("features");
   else {
@@ -172,9 +174,15 @@ static void test_symmetric_and_unpack(void) {
   if (xun_parse_size_bytes("10MiB", &bytes) != 0 || bytes != 10485760ULL) {
     fail("xun_parse_size_bytes 10MiB");
   }
-  uint64_t ms = 0;
-  if (xun_parse_duration_ms("1h30m", &ms) != 0 || ms != 5400000ULL) {
-    fail("xun_parse_duration_ms 1h30m");
+  double secs = 0;
+  if (xun_parse_duration_seconds("1h30m", &secs) != 0 || secs != 5400.0) {
+    fail("xun_parse_duration_seconds 1h30m");
+  }
+  if (xun_parse_duration_seconds("500ms", &secs) != 0 || secs != 0.5) {
+    fail("xun_parse_duration_seconds 500ms");
+  }
+  if (xun_parse_duration_seconds("15s500ms", &secs) != 0 || secs != 15.5) {
+    fail("xun_parse_duration_seconds 15s500ms");
   }
   int parts[4];
   size_t count = 0;
@@ -239,7 +247,11 @@ static void test_full_core_tags(void) {
   }
   expect_str(xun_dict_get(doc, "str_plain"), "hello world", "core str");
   expect_int(xun_dict_get(doc, "num_int"), 42, "core int");
-  expect_int(xun_dict_get(doc, "num_oct"), 0755, "core oct");
+  expect_tagged(xun_dict_get(doc, "num_hex"), "x", "DEAD_BEEF", "core hex");
+  expect_tagged(xun_dict_get(doc, "num_oct"), "o", "755", "core oct");
+  int64_t n = 0;
+  if (xun_to_int(xun_dict_get(doc, "num_hex"), &n) != 0 || n != 0xDEADBEEFLL) fail("core hex to_int");
+  if (xun_to_int(xun_dict_get(doc, "num_oct"), &n) != 0 || n != 0755) fail("core oct to_int");
   const xun_value *bt = xun_dict_get(doc, "flag_t");
   if (!bt || bt->kind != XUN_BOOL || !bt->u.b) fail("flag_t");
   expect_tagged(xun_dict_get(doc, "date_v"), "d", "2026-08-14", "date_v");
@@ -248,7 +260,8 @@ static void test_full_core_tags(void) {
   expect_tagged(xun_dict_get(doc, "tz_v"), "tz", "Asia/Shanghai", "tz_v");
   expect_tagged(xun_dict_get(doc, "dur_v"), "du", "1d2h30m15s", "dur_v");
   expect_tagged(xun_dict_get(doc, "sz_v"), "sz", "10GiB", "sz_v");
-  expect_int(xun_dict_get(doc, "unix_v"), 1700000000, "unix_v");
+  expect_tagged(xun_dict_get(doc, "unix_v"), "unix", "1700000000", "unix_v");
+  if (xun_to_int(xun_dict_get(doc, "unix_v"), &n) != 0 || n != 1700000000LL) fail("unix to_int");
   expect_tagged(xun_dict_get(doc, "ver_v"), "ver", "3.10.1", "ver_v");
   expect_tagged(xun_dict_get(doc, "uuid_v"), "uuid", "12345678-1234-5678-1234-567812345678", "uuid_v");
   expect_tagged(xun_dict_get(doc, "ip4_v"), "ip", "127.0.0.1", "ip4_v");
@@ -343,25 +356,45 @@ static void test_extreme_indent_errors(void) {
   expect_err("server:\n  host: 1\n  - item1\n", "mix dict/list");
 }
 
-static void test_encode_strips_surrounding_quotes(void) {
+static void test_encode_keeps_literal_quotes(void) {
+  /* Value is the 7-char string "hello" (with quote chars). */
+  const char *src = "a: \"\\\"hello\\\"\"\n";
   xun_value *doc = NULL;
   xun_error err;
-  const char *src = "a: \"hello\"\nb: \"\"\nc: \"x\"\nitems:\n  - \"p\"\n  - \"q\"\n";
   if (xun_parse(src, &doc, &err) != 0) {
-    fail("quote strip parse");
+    fail("literal quotes parse");
     return;
   }
+  expect_str(xun_dict_get(doc, "a"), "\"hello\"", "literal quote value");
   char *encoded = NULL;
   size_t len = 0;
   if (xun_encode(doc, &encoded, &len) != 0) {
-    fail("quote strip encode");
+    fail("literal quotes encode");
     xun_free(doc);
     return;
   }
-  const char *want = "a: hello\nb:\nc: x\nitems:\n  - p\n  - q\n";
-  if (strcmp(encoded, want) != 0) {
-    fprintf(stderr, "quote strip got: %s\nwant: %s\n", encoded, want);
-    fail("quote strip mismatch");
+  if (strcmp(encoded, src) != 0) {
+    fprintf(stderr, "literal quotes got: %s\nwant: %s\n", encoded, src);
+    fail("literal quotes roundtrip");
+  }
+  free(encoded);
+  xun_free(doc);
+
+  /* Two quote chars round-trip as well. */
+  const char *src2 = "a: \"\\\"\\\"\"\n";
+  if (xun_parse(src2, &doc, &err) != 0) {
+    fail("empty quotes parse");
+    return;
+  }
+  expect_str(xun_dict_get(doc, "a"), "\"\"", "empty quotes value");
+  if (xun_encode(doc, &encoded, &len) != 0) {
+    fail("empty quotes encode");
+    xun_free(doc);
+    return;
+  }
+  if (strcmp(encoded, src2) != 0) {
+    fprintf(stderr, "empty quotes got: %s\nwant: %s\n", encoded, src2);
+    fail("empty quotes roundtrip");
   }
   free(encoded);
   xun_free(doc);
@@ -533,6 +566,496 @@ static void test_extreme(void) {
   free(d65);
 }
 
+/* ============================================================
+ * RFC-0001: Optional 'end' block delimiter
+ * ============================================================ */
+
+static void test_rfc0001_bare_end_closes_top_level_dict(void) {
+  xun_value *doc = NULL;
+  xun_error err;
+  const char *src =
+      "server:\n"
+      "  host: localhost\n"
+      "  port: !n 8080\n"
+      "end\n";
+  if (xun_parse(src, &doc, &err) != 0) { fail("rfc0001 bare end top dict"); return; }
+  const xun_value *server = xun_dict_get(doc, "server");
+  expect_str(xun_dict_get(server, "host"), "localhost", "rfc0001 host");
+  expect_int(xun_dict_get(server, "port"), 8080, "rfc0001 port");
+  xun_free(doc);
+}
+
+static void test_rfc0001_bare_end_closes_nested_dict(void) {
+  xun_value *doc = NULL;
+  xun_error err;
+  const char *src =
+      "server:\n"
+      "  host: localhost\n"
+      "  tls:\n"
+      "    cert: /etc/ssl/cert.pem\n"
+      "    mode: !o 755\n"
+      "  end\n"
+      "  port: !n 8080\n"
+      "end\n";
+  if (xun_parse(src, &doc, &err) != 0) { fail("rfc0001 bare end nested dict"); return; }
+  const xun_value *server = xun_dict_get(doc, "server");
+  expect_str(xun_dict_get(server, "host"), "localhost", "rfc0001 nested host");
+  expect_str(xun_dict_get(xun_dict_get(server, "tls"), "cert"), "/etc/ssl/cert.pem", "rfc0001 tls cert");
+  expect_int(xun_dict_get(server, "port"), 8080, "rfc0001 nested port");
+  xun_free(doc);
+}
+
+static void test_rfc0001_end_with_key_closes_named_nested_dict(void) {
+  xun_value *doc = NULL;
+  xun_error err;
+  const char *src =
+      "server:\n"
+      "  host: localhost\n"
+      "  tls:\n"
+      "    cert: /etc/ssl/cert.pem\n"
+      "  end tls\n"
+      "  port: !n 8080\n"
+      "end server\n";
+  if (xun_parse(src, &doc, &err) != 0) { fail("rfc0001 end key nested dict"); return; }
+  const xun_value *server = xun_dict_get(doc, "server");
+  expect_str(xun_dict_get(server, "host"), "localhost", "rfc0001 named host");
+  expect_str(xun_dict_get(xun_dict_get(server, "tls"), "cert"), "/etc/ssl/cert.pem", "rfc0001 named cert");
+  expect_int(xun_dict_get(server, "port"), 8080, "rfc0001 named port");
+  xun_free(doc);
+}
+
+static void test_rfc0001_bare_end_closes_list_block(void) {
+  xun_value *doc = NULL;
+  xun_error err;
+  const char *src =
+      "servers:\n"
+      "  - host: a\n"
+      "    port: 80\n"
+      "  - host: b\n"
+      "    port: 81\n"
+      "end\n";
+  if (xun_parse(src, &doc, &err) != 0) { fail("rfc0001 bare end list"); return; }
+  const xun_value *servers = xun_dict_get(doc, "servers");
+  if (!servers || servers->kind != XUN_LIST || servers->u.list.len != 2) fail("rfc0001 list len");
+  else {
+    expect_str(xun_dict_get(servers->u.list.items[0], "host"), "a", "rfc0001 list[0] host");
+    expect_str(xun_dict_get(servers->u.list.items[1], "host"), "b", "rfc0001 list[1] host");
+  }
+  xun_free(doc);
+}
+
+static void test_rfc0001_bare_end_equivalent_to_dedent(void) {
+  xun_value *with_end = NULL, *without_end = NULL;
+  xun_error err;
+  const char *src_with =
+      "a: 1\n"
+      "b: 2\n"
+      "end\n";
+  const char *src_without =
+      "a: 1\n"
+      "b: 2\n";
+  if (xun_parse(src_with, &with_end, &err) != 0) { fail("rfc0001 dedent with"); return; }
+  if (xun_parse(src_without, &without_end, &err) != 0) { fail("rfc0001 dedent without"); xun_free(with_end); return; }
+  expect_str(xun_dict_get(with_end, "a"), "1", "rfc0001 dedent a");
+  expect_str(xun_dict_get(with_end, "b"), "2", "rfc0001 dedent b");
+  expect_str(xun_dict_get(without_end, "a"), "1", "rfc0001 dedent wo a");
+  expect_str(xun_dict_get(without_end, "b"), "2", "rfc0001 dedent wo b");
+  xun_free(with_end);
+  xun_free(without_end);
+}
+
+static void test_rfc0001_end_key_mismatch_throws(void) {
+  xun_value *doc = NULL;
+  xun_error err;
+  const char *src =
+      "server:\n"
+      "  host: localhost\n"
+      "  port: 8080\n"
+      "end tls\n";
+  if (xun_parse(src, &doc, &err) == 0) {
+    fail("rfc0001 end-key mismatch should fail");
+    xun_free(doc);
+  }
+}
+
+static void test_rfc0001_bare_end_on_root_allowed(void) {
+  xun_value *doc = NULL;
+  xun_error err;
+  const char *src =
+      "a: 1\n"
+      "end\n";
+  if (xun_parse(src, &doc, &err) != 0) { fail("rfc0001 bare end root"); return; }
+  expect_str(xun_dict_get(doc, "a"), "1", "rfc0001 root end a");
+  xun_free(doc);
+}
+
+static void test_rfc0001_end_as_dict_key_allowed(void) {
+  xun_value *doc = NULL;
+  xun_error err;
+  const char *src =
+      "end: 1\n"
+      "end2: 2\n";
+  if (xun_parse(src, &doc, &err) != 0) { fail("rfc0001 end as key"); return; }
+  expect_str(xun_dict_get(doc, "end"), "1", "rfc0001 end key");
+  expect_str(xun_dict_get(doc, "end2"), "2", "rfc0001 end2 key");
+  xun_free(doc);
+}
+
+static void test_rfc0001_end_inside_multiline_block_is_literal(void) {
+  xun_value *doc = NULL;
+  xun_error err;
+  const char *src =
+      "script: |\n"
+      "  echo \"end of script\"\n"
+      "|\n";
+  if (xun_parse(src, &doc, &err) != 0) { fail("rfc0001 multiline end"); return; }
+  expect_str(xun_dict_get(doc, "script"), "echo \"end of script\"", "rfc0001 multiline script");
+  xun_free(doc);
+}
+
+static void test_rfc0001_deeply_nested_end_chains(void) {
+  xun_value *doc = NULL;
+  xun_error err;
+  const char *src =
+      "a:\n"
+      "  b:\n"
+      "    c:\n"
+      "      d: !n 1\n"
+      "    end c\n"
+      "  end b\n"
+      "end a\n"
+      "e: !n 2\n";
+  if (xun_parse(src, &doc, &err) != 0) { fail("rfc0001 deep nested"); return; }
+  const xun_value *a = xun_dict_get(doc, "a");
+  const xun_value *b = xun_dict_get(a, "b");
+  const xun_value *c = xun_dict_get(b, "c");
+  expect_int(xun_dict_get(c, "d"), 1, "rfc0001 deep d");
+  expect_int(xun_dict_get(doc, "e"), 2, "rfc0001 deep e");
+  xun_free(doc);
+}
+
+static void test_rfc0001_end_allows_sibling_content_after(void) {
+  xun_value *doc = NULL;
+  xun_error err;
+  const char *src =
+      "server:\n"
+      "  host: a\n"
+      "end server\n"
+      "proxy:\n"
+      "  host: b\n"
+      "end proxy\n";
+  if (xun_parse(src, &doc, &err) != 0) { fail("rfc0001 siblings"); return; }
+  expect_str(xun_dict_get(xun_dict_get(doc, "server"), "host"), "a", "rfc0001 sib server host");
+  expect_str(xun_dict_get(xun_dict_get(doc, "proxy"), "host"), "b", "rfc0001 sib proxy host");
+  xun_free(doc);
+}
+
+static void test_rfc0001_root_end_with_complex_dict(void) {
+  xun_value *doc = NULL;
+  xun_error err;
+  const char *src =
+      "app:\n"
+      "  name: myapp\n"
+      "  ports: !n[80, 443]\n"
+      "  version: !ver 1.2.3\n"
+      "end app\n"
+      "trailer: hi\n";
+  if (xun_parse(src, &doc, &err) != 0) { fail("rfc0001 root complex"); return; }
+  const xun_value *app = xun_dict_get(doc, "app");
+  expect_str(xun_dict_get(app, "name"), "myapp", "rfc0001 root name");
+  const xun_value *ports = xun_dict_get(app, "ports");
+  if (!ports || ports->kind != XUN_LIST || ports->u.list.len != 2) fail("rfc0001 root ports len");
+  else {
+    expect_int(ports->u.list.items[0], 80, "rfc0001 root port 0");
+    expect_int(ports->u.list.items[1], 443, "rfc0001 root port 1");
+  }
+  expect_tagged(xun_dict_get(app, "version"), "ver", "1.2.3", "rfc0001 root ver");
+  expect_str(xun_dict_get(doc, "trailer"), "hi", "rfc0001 root trailer");
+  xun_free(doc);
+}
+
+/* ============================================================
+ * RFC-0002: Inline object / array literals
+ * ============================================================ */
+
+static void test_rfc0002_inline_object_as_list_item(void) {
+  xun_value *doc = NULL;
+  xun_error err;
+  const char *src =
+      "servers:\n"
+      "  - {host: a, port: 80}\n"
+      "  - {host: b, port: 81}\n";
+  if (xun_parse(src, &doc, &err) != 0) { fail("rfc0002 inline obj list item"); return; }
+  const xun_value *servers = xun_dict_get(doc, "servers");
+  if (!servers || servers->kind != XUN_LIST || servers->u.list.len != 2) fail("rfc0002 inline obj len");
+  else {
+    expect_str(xun_dict_get(servers->u.list.items[0], "host"), "a", "rfc0002 inline obj[0] host");
+    expect_str(xun_dict_get(servers->u.list.items[0], "port"), "80", "rfc0002 inline obj[0] port");
+    expect_str(xun_dict_get(servers->u.list.items[1], "host"), "b", "rfc0002 inline obj[1] host");
+    expect_str(xun_dict_get(servers->u.list.items[1], "port"), "81", "rfc0002 inline obj[1] port");
+  }
+  xun_free(doc);
+}
+
+static void test_rfc0002_inline_object_with_quoted_value(void) {
+  xun_value *doc = NULL;
+  xun_error err;
+  const char *src =
+      "servers:\n"
+      "  - {host: \"my host\", port: 80}\n";
+  if (xun_parse(src, &doc, &err) != 0) { fail("rfc0002 inline quoted"); return; }
+  const xun_value *servers = xun_dict_get(doc, "servers");
+  const xun_value *first = servers->u.list.items[0];
+  expect_str(xun_dict_get(first, "host"), "my host", "rfc0002 quoted host");
+  xun_free(doc);
+}
+
+static void test_rfc0002_inline_object_with_tagged_values(void) {
+  xun_value *doc = NULL;
+  xun_error err;
+  const char *src =
+      "cfg:\n"
+      "  - {port: !n 8080, mode: !o 755, color: !xb FF00AA}\n";
+  if (xun_parse(src, &doc, &err) != 0) { fail("rfc0002 inline tagged"); return; }
+  const xun_value *cfg = xun_dict_get(doc, "cfg");
+  const xun_value *first = cfg->u.list.items[0];
+  expect_int(xun_dict_get(first, "port"), 8080, "rfc0002 tagged port");
+  expect_tagged(xun_dict_get(first, "mode"), "o", "755", "rfc0002 tagged mode");
+  const xun_value *color = xun_dict_get(first, "color");
+  if (!color || color->kind != XUN_BYTES || color->u.bytes.len != 3 ||
+      color->u.bytes.data[0] != 0xff || color->u.bytes.data[1] != 0x00 || color->u.bytes.data[2] != 0xaa) {
+    fail("rfc0002 tagged color");
+  }
+  xun_free(doc);
+}
+
+static void test_rfc0002_inline_object_with_empty_value(void) {
+  xun_value *doc = NULL;
+  xun_error err;
+  const char *src =
+      "cfg:\n"
+      "  - {name: \"\"}\n"
+      "  - {empty:}\n";
+  if (xun_parse(src, &doc, &err) != 0) { fail("rfc0002 inline empty val"); return; }
+  const xun_value *cfg = xun_dict_get(doc, "cfg");
+  expect_str(xun_dict_get(cfg->u.list.items[0], "name"), "", "rfc0002 empty[0]");
+  expect_str(xun_dict_get(cfg->u.list.items[1], "empty"), "", "rfc0002 empty[1]");
+  xun_free(doc);
+}
+
+static void test_rfc0002_compact_array_of_inline_objects_no_tag(void) {
+  xun_value *doc = NULL;
+  xun_error err;
+  const char *src =
+      "peers: [{host: a, port: 80}, {host: b, port: 81}]\n";
+  if (xun_parse(src, &doc, &err) != 0) { fail("rfc0002 compact obj no tag"); return; }
+  const xun_value *peers = xun_dict_get(doc, "peers");
+  if (!peers || peers->kind != XUN_LIST || peers->u.list.len != 2) fail("rfc0002 compact len");
+  else {
+    expect_str(xun_dict_get(peers->u.list.items[0], "host"), "a", "rfc0002 compact[0] host");
+    expect_str(xun_dict_get(peers->u.list.items[1], "host"), "b", "rfc0002 compact[1] host");
+  }
+  xun_free(doc);
+}
+
+static void test_rfc0002_compact_tagged_array_of_inline_objects(void) {
+  xun_value *doc = NULL;
+  xun_error err;
+  const char *src =
+      "items: !o[{a: 1, b: 2}, {c: 3}]\n";
+  if (xun_parse(src, &doc, &err) != 0) { fail("rfc0002 compact tagged obj"); return; }
+  const xun_value *items = xun_dict_get(doc, "items");
+  if (!items || items->kind != XUN_LIST || items->u.list.len != 2) fail("rfc0002 compact tagged len");
+  else {
+    expect_str(xun_dict_get(items->u.list.items[0], "a"), "1", "rfc0002 tagged obj[0].a");
+    expect_str(xun_dict_get(items->u.list.items[0], "b"), "2", "rfc0002 tagged obj[0].b");
+    expect_str(xun_dict_get(items->u.list.items[1], "c"), "3", "rfc0002 tagged obj[1].c");
+  }
+  xun_free(doc);
+}
+
+static void test_rfc0002_mix_block_and_inline_list_items(void) {
+  xun_value *doc = NULL;
+  xun_error err;
+  const char *src =
+      "servers:\n"
+      "  - {host: a, port: 80}\n"
+      "  - host: b\n"
+      "    port: 81\n"
+      "    tls: enabled\n";
+  if (xun_parse(src, &doc, &err) != 0) { fail("rfc0002 mix list"); return; }
+  const xun_value *servers = xun_dict_get(doc, "servers");
+  if (!servers || servers->kind != XUN_LIST || servers->u.list.len != 2) fail("rfc0002 mix len");
+  else {
+    expect_str(xun_dict_get(servers->u.list.items[0], "host"), "a", "rfc0002 mix[0] host");
+    expect_str(xun_dict_get(servers->u.list.items[1], "host"), "b", "rfc0002 mix[1] host");
+    expect_str(xun_dict_get(servers->u.list.items[1], "tls"), "enabled", "rfc0002 mix[1] tls");
+  }
+  xun_free(doc);
+}
+
+static void test_rfc0002_empty_inline_object(void) {
+  xun_value *doc = NULL;
+  xun_error err;
+  const char *src =
+      "cfg:\n"
+      "  - {}\n";
+  if (xun_parse(src, &doc, &err) != 0) { fail("rfc0002 empty inline obj"); return; }
+  const xun_value *cfg = xun_dict_get(doc, "cfg");
+  const xun_value *first = cfg->u.list.items[0];
+  if (!first || first->kind != XUN_DICT || first->u.dict.len != 0) fail("rfc0002 empty obj dict");
+  xun_free(doc);
+}
+
+static void test_rfc0002_inline_object_in_nested_block(void) {
+  xun_value *doc = NULL;
+  xun_error err;
+  const char *src =
+      "data:\n"
+      "  items:\n"
+      "    - {id: 1, name: alice}\n"
+      "    - {id: 2, name: bob}\n";
+  if (xun_parse(src, &doc, &err) != 0) { fail("rfc0002 nested inline"); return; }
+  const xun_value *data = xun_dict_get(doc, "data");
+  const xun_value *items = xun_dict_get(data, "items");
+  if (!items || items->kind != XUN_LIST || items->u.list.len != 2) fail("rfc0002 nested len");
+  else {
+    expect_str(xun_dict_get(items->u.list.items[0], "id"), "1", "rfc0002 nested[0] id");
+    expect_str(xun_dict_get(items->u.list.items[0], "name"), "alice", "rfc0002 nested[0] name");
+    expect_str(xun_dict_get(items->u.list.items[1], "id"), "2", "rfc0002 nested[1] id");
+    expect_str(xun_dict_get(items->u.list.items[1], "name"), "bob", "rfc0002 nested[1] name");
+  }
+  xun_free(doc);
+}
+
+static void test_rfc0002_duplicate_keys_in_inline_object_throws(void) {
+  xun_value *doc = NULL;
+  xun_error err;
+  const char *src =
+      "cfg:\n"
+      "  - {a: 1, a: 2}\n";
+  if (xun_parse(src, &doc, &err) == 0) {
+    fail("rfc0002 dup keys should fail");
+    xun_free(doc);
+  }
+}
+
+static void test_rfc0002_malformed_inline_object_throws(void) {
+  xun_value *doc = NULL;
+  xun_error err;
+  const char *src =
+      "cfg:\n"
+      "  - {a, b: 2}\n";
+  if (xun_parse(src, &doc, &err) == 0) {
+    fail("rfc0002 malformed inline should fail");
+    xun_free(doc);
+  }
+}
+
+static void test_rfc0002_inline_object_preserves_key_order(void) {
+  xun_value *doc = NULL;
+  xun_error err;
+  const char *src =
+      "cfg:\n"
+      "  - {z: 1, a: 2, k: 3}\n";
+  if (xun_parse(src, &doc, &err) != 0) { fail("rfc0002 key order"); return; }
+  const xun_value *cfg = xun_dict_get(doc, "cfg");
+  const xun_value *first = cfg->u.list.items[0];
+  if (!first || first->kind != XUN_DICT || first->u.dict.len != 3) fail("rfc0002 key order len");
+  else {
+    if (strcmp(first->u.dict.items[0].key, "z") != 0) fail("rfc0002 order[0]");
+    if (strcmp(first->u.dict.items[1].key, "a") != 0) fail("rfc0002 order[1]");
+    if (strcmp(first->u.dict.items[2].key, "k") != 0) fail("rfc0002 order[2]");
+  }
+  xun_free(doc);
+}
+
+static void test_rfc0002_nested_compact_array_in_inline_object(void) {
+  xun_value *doc = NULL;
+  xun_error err;
+  const char *src =
+      "cfg:\n"
+      "  - {tags: !s[a, b, c], port: !n 80}\n";
+  if (xun_parse(src, &doc, &err) != 0) { fail("rfc0002 nested compact"); return; }
+  const xun_value *cfg = xun_dict_get(doc, "cfg");
+  const xun_value *first = cfg->u.list.items[0];
+  const xun_value *tags = xun_dict_get(first, "tags");
+  if (!tags || tags->kind != XUN_LIST || tags->u.list.len != 3) fail("rfc0002 tags len");
+  else {
+    expect_str(tags->u.list.items[0], "a", "rfc0002 tags[0]");
+    expect_str(tags->u.list.items[1], "b", "rfc0002 tags[1]");
+    expect_str(tags->u.list.items[2], "c", "rfc0002 tags[2]");
+  }
+  expect_int(xun_dict_get(first, "port"), 80, "rfc0002 nested compact port");
+  xun_free(doc);
+}
+
+static void test_rfc0002_traditional_block_list_regression(void) {
+  xun_value *doc = NULL;
+  xun_error err;
+  const char *src =
+      "items:\n"
+      "  - one\n"
+      "  - two\n";
+  if (xun_parse(src, &doc, &err) != 0) { fail("rfc0002 block list reg"); return; }
+  const xun_value *items = xun_dict_get(doc, "items");
+  if (!items || items->kind != XUN_LIST || items->u.list.len != 2) fail("rfc0002 block list len");
+  else {
+    expect_str(items->u.list.items[0], "one", "rfc0002 block list[0]");
+    expect_str(items->u.list.items[1], "two", "rfc0002 block list[1]");
+  }
+  xun_free(doc);
+}
+
+static void test_rfc0002_traditional_compact_array_regression(void) {
+  xun_value *doc = NULL;
+  xun_error err;
+  const char *src = "ports: !n[80, 443, 8080]\n";
+  if (xun_parse(src, &doc, &err) != 0) { fail("rfc0002 compact reg"); return; }
+  const xun_value *ports = xun_dict_get(doc, "ports");
+  if (!ports || ports->kind != XUN_LIST || ports->u.list.len != 3) fail("rfc0002 compact len");
+  else {
+    expect_int(ports->u.list.items[0], 80, "rfc0002 compact reg[0]");
+    expect_int(ports->u.list.items[1], 443, "rfc0002 compact reg[1]");
+    expect_int(ports->u.list.items[2], 8080, "rfc0002 compact reg[2]");
+  }
+  xun_free(doc);
+}
+
+static void test_rfc0002_end_as_inline_object_value(void) {
+  xun_value *doc = NULL;
+  xun_error err;
+  const char *src =
+      "cfg:\n"
+      "  - {end: foo, value: 1}\n";
+  if (xun_parse(src, &doc, &err) != 0) { fail("rfc0002 end key in inline"); return; }
+  const xun_value *cfg = xun_dict_get(doc, "cfg");
+  const xun_value *first = cfg->u.list.items[0];
+  expect_str(xun_dict_get(first, "end"), "foo", "rfc0002 end as key");
+  expect_str(xun_dict_get(first, "value"), "1", "rfc0002 end as key value");
+  xun_free(doc);
+}
+
+static void test_rfc0002_inline_object_with_complex_tagged_values(void) {
+  xun_value *doc = NULL;
+  xun_error err;
+  const char *src =
+      "cfg:\n"
+      "  - {host: a, port: !n 8080, tag: !ver 1.2, code: !xb CAFE}\n";
+  if (xun_parse(src, &doc, &err) != 0) { fail("rfc0002 complex tagged"); return; }
+  const xun_value *cfg = xun_dict_get(doc, "cfg");
+  const xun_value *first = cfg->u.list.items[0];
+  expect_str(xun_dict_get(first, "host"), "a", "rfc0002 complex host");
+  expect_int(xun_dict_get(first, "port"), 8080, "rfc0002 complex port");
+  expect_tagged(xun_dict_get(first, "tag"), "ver", "1.2", "rfc0002 complex ver");
+  const xun_value *code = xun_dict_get(first, "code");
+  if (!code || code->kind != XUN_BYTES || code->u.bytes.len != 2 ||
+      code->u.bytes.data[0] != 0xCA || code->u.bytes.data[1] != 0xFE) {
+    fail("rfc0002 complex code");
+  }
+  xun_free(doc);
+}
+
 int main(int argc, char **argv) {
   const char *root = argc > 1 ? argv[1] : "..";
   test_example(root);
@@ -545,10 +1068,41 @@ int main(int argc, char **argv) {
   test_full_core_tags();
   test_invalid_glyphs_all_tags();
   test_uuid_ip_unpackers();
-  test_encode_strips_surrounding_quotes();
+  test_encode_keeps_literal_quotes();
   test_encode_numeric_looking_strings();
   test_extreme();
   test_extreme_indent_errors();
+  /* RFC-0001 */
+  test_rfc0001_bare_end_closes_top_level_dict();
+  test_rfc0001_bare_end_closes_nested_dict();
+  test_rfc0001_end_with_key_closes_named_nested_dict();
+  test_rfc0001_bare_end_closes_list_block();
+  test_rfc0001_bare_end_equivalent_to_dedent();
+  test_rfc0001_end_key_mismatch_throws();
+  test_rfc0001_bare_end_on_root_allowed();
+  test_rfc0001_end_as_dict_key_allowed();
+  test_rfc0001_end_inside_multiline_block_is_literal();
+  test_rfc0001_deeply_nested_end_chains();
+  test_rfc0001_end_allows_sibling_content_after();
+  test_rfc0001_root_end_with_complex_dict();
+  /* RFC-0002 */
+  test_rfc0002_inline_object_as_list_item();
+  test_rfc0002_inline_object_with_quoted_value();
+  test_rfc0002_inline_object_with_tagged_values();
+  test_rfc0002_inline_object_with_empty_value();
+  test_rfc0002_compact_array_of_inline_objects_no_tag();
+  test_rfc0002_compact_tagged_array_of_inline_objects();
+  test_rfc0002_mix_block_and_inline_list_items();
+  test_rfc0002_empty_inline_object();
+  test_rfc0002_inline_object_in_nested_block();
+  test_rfc0002_duplicate_keys_in_inline_object_throws();
+  test_rfc0002_malformed_inline_object_throws();
+  test_rfc0002_inline_object_preserves_key_order();
+  test_rfc0002_nested_compact_array_in_inline_object();
+  test_rfc0002_traditional_block_list_regression();
+  test_rfc0002_traditional_compact_array_regression();
+  test_rfc0002_end_as_inline_object_value();
+  test_rfc0002_inline_object_with_complex_tagged_values();
   expect_err("a: 1\na: 2\n", "duplicate");
   expect_err("x: !f 8080\n", "float");
   expect_err("a: |\n  hi\n", "multiline");

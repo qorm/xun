@@ -72,10 +72,15 @@ int xun_encode_file(const xun_value *v, const char *path);
 
 /* Format unpackers */
 int xun_parse_size_bytes(const char *sz_str, uint64_t *out_bytes);
-int xun_parse_duration_ms(const char *du_str, uint64_t *out_ms);
+int xun_parse_duration_seconds(const char *du_str, double *out_seconds);
 int xun_parse_version_parts(const char *ver_str, int *out_parts, size_t max_parts, size_t *out_count);
 int xun_parse_uuid(const char *uuid_str, uint8_t out[16]);
 int xun_parse_ip(const char *ip_str, uint8_t out[16], int *out_is_v6);
+
+/* toNumber()-style integer conversion. Accepts XUN_INT and XUN_TAGGED values
+   with tags !o (octal), !x (hex, underscores allowed), !unix, !n, !i.
+   Returns 0 on success, -1 on error. */
+int xun_to_int(const xun_value *v, int64_t *out);
 
 #ifdef __cplusplus
 }
