@@ -5,7 +5,9 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
@@ -809,5 +811,455 @@ func TestExtremeEncoderLimits(t *testing.T) {
 	}
 	if !strings.Contains(text, "8080: !s 8080") || !strings.Contains(text, "3.10: !s 3.10") {
 		t.Fatalf("numeric keys: %q", text)
+	}
+}
+
+// === RFC-0001: optional 'end' block delimiter ===
+
+func TestRFC0001_BareEndClosesTopLevelDict(t *testing.T) {
+	src := "server:\n  host: localhost\n  port: 8080\nend\n"
+	doc, err := Decode(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := doc.(map[string]any)["server"].(map[string]any)
+	if server["host"] != "localhost" {
+		t.Fatalf("host=%v", server["host"])
+	}
+	if server["port"] != "8080" {
+		t.Fatalf("port=%v", server["port"])
+	}
+}
+
+func TestRFC0001_BareEndClosesNestedDict(t *testing.T) {
+	src := "server:\n  host: localhost\n  tls:\n    cert: /etc/ssl/cert.pem\n    mode: 755\n  end\n  port: 8080\nend\n"
+	doc, err := Decode(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := doc.(map[string]any)["server"].(map[string]any)
+	tls := server["tls"].(map[string]any)
+	if tls["cert"] != "/etc/ssl/cert.pem" {
+		t.Fatalf("cert=%v", tls["cert"])
+	}
+	if server["port"] != "8080" {
+		t.Fatalf("port=%v", server["port"])
+	}
+}
+
+func TestRFC0001_EndWithKeyClosesNamedNestedDict(t *testing.T) {
+	src := "server:\n  host: localhost\n  tls:\n    cert: /etc/ssl/cert.pem\n  end tls\n  port: 8080\nend server\n"
+	doc, err := Decode(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := doc.(map[string]any)["server"].(map[string]any)
+	if server["host"] != "localhost" {
+		t.Fatalf("host=%v", server["host"])
+	}
+	if server["tls"].(map[string]any)["cert"] != "/etc/ssl/cert.pem" {
+		t.Fatalf("cert=%v", server["tls"])
+	}
+	if server["port"] != "8080" {
+		t.Fatalf("port=%v", server["port"])
+	}
+}
+
+func TestRFC0001_BareEndClosesListBlock(t *testing.T) {
+	src := "servers:\n  - host: a\n    port: 80\n  - host: b\n    port: 81\nend\n"
+	doc, err := Decode(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	servers := doc.(map[string]any)["servers"].([]any)
+	if len(servers) != 2 {
+		t.Fatalf("len=%d", len(servers))
+	}
+	if servers[0].(map[string]any)["host"] != "a" {
+		t.Fatalf("host=%v", servers[0])
+	}
+	if servers[1].(map[string]any)["host"] != "b" {
+		t.Fatalf("host=%v", servers[1])
+	}
+}
+
+func TestRFC0001_BareEndEquivalentToDedent(t *testing.T) {
+	withEnd := "a: 1\nb: 2\nend\n"
+	withoutEnd := "a: 1\nb: 2\n"
+	d1, err1 := Decode(withEnd)
+	if err1 != nil {
+		t.Fatal(err1)
+	}
+	d2, err2 := Decode(withoutEnd)
+	if err2 != nil {
+		t.Fatal(err2)
+	}
+	if !reflect.DeepEqual(d1, d2) {
+		t.Fatalf("mismatch: %+v vs %+v", d1, d2)
+	}
+}
+
+func TestRFC0001_EndKeyMismatchThrows(t *testing.T) {
+	src := "server:\n  host: localhost\n  port: 8080\nend tls\n"
+	_, err := Decode(src)
+	if err == nil {
+		t.Fatal("expected end-key mismatch error")
+	}
+	if !strings.Contains(err.Error(), "end-key mismatch") {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestRFC0001_BareEndOnRootAllowed(t *testing.T) {
+	src := "a: 1\nend\n"
+	doc, err := Decode(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if doc.(map[string]any)["a"] != "1" {
+		t.Fatalf("a=%v", doc.(map[string]any)["a"])
+	}
+}
+
+func TestRFC0001_EndAsDictKeyAllowed(t *testing.T) {
+	// 'end' as a dict key is just a regular identifier, not a delimiter.
+	src := "end: 1\nend2: 2\n"
+	doc, err := Decode(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := doc.(map[string]any)
+	if m["end"] != "1" {
+		t.Fatalf("end=%v", m["end"])
+	}
+	if m["end2"] != "2" {
+		t.Fatalf("end2=%v", m["end2"])
+	}
+}
+
+func TestRFC0001_EndInsideMultilineBlockIsLiteral(t *testing.T) {
+	src := "script: |\n  echo \"end of script\"\n|\n"
+	doc, err := Decode(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if doc.(map[string]any)["script"] != `echo "end of script"` {
+		t.Fatalf("script=%v", doc.(map[string]any)["script"])
+	}
+}
+
+func TestRFC0001_DeeplyNestedEndChains(t *testing.T) {
+	src := "a:\n  b:\n    c:\n      d: 1\n    end c\n  end b\nend a\ne: 2\n"
+	doc, err := Decode(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := doc.(map[string]any)["a"].(map[string]any)
+	b := a["b"].(map[string]any)
+	c := b["c"].(map[string]any)
+	if c["d"] != "1" {
+		t.Fatalf("d=%v", c["d"])
+	}
+	if doc.(map[string]any)["e"] != "2" {
+		t.Fatalf("e=%v", doc.(map[string]any)["e"])
+	}
+}
+
+func TestRFC0001_EndAllowsSiblingContentAfter(t *testing.T) {
+	src := "server:\n  host: a\nend server\nproxy:\n  host: b\nend proxy\n"
+	doc, err := Decode(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if doc.(map[string]any)["server"].(map[string]any)["host"] != "a" {
+		t.Fatalf("server.host=%v", doc)
+	}
+	if doc.(map[string]any)["proxy"].(map[string]any)["host"] != "b" {
+		t.Fatalf("proxy.host=%v", doc)
+	}
+}
+
+func TestRFC0001_RootEndWithComplexDict(t *testing.T) {
+	src := "name: cfg\nitems:\n  - one\n  - two\nflags:\n  debug: true\n  verbose: false\nend\n"
+	doc, err := Decode(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := doc.(map[string]any)
+	if m["name"] != "cfg" {
+		t.Fatalf("name=%v", m["name"])
+	}
+	if m["items"].([]any)[0] != "one" {
+		t.Fatalf("items=%v", m["items"])
+	}
+	if m["flags"].(map[string]any)["debug"] != "true" {
+		t.Fatalf("flags=%v", m["flags"])
+	}
+}
+
+// === RFC-0002: inline object / array literals ===
+
+func TestRFC0002_InlineObjectAsListItem(t *testing.T) {
+	src := "servers:\n  - {host: a, port: 80}\n  - {host: b, port: 81}\n"
+	doc, err := Decode(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	servers := doc.(map[string]any)["servers"].([]any)
+	if len(servers) != 2 {
+		t.Fatalf("len=%d", len(servers))
+	}
+	if servers[0].(map[string]any)["host"] != "a" || servers[0].(map[string]any)["port"] != "80" {
+		t.Fatalf("servers[0]=%v", servers[0])
+	}
+	if servers[1].(map[string]any)["host"] != "b" || servers[1].(map[string]any)["port"] != "81" {
+		t.Fatalf("servers[1]=%v", servers[1])
+	}
+}
+
+func TestRFC0002_InlineObjectWithQuotedValue(t *testing.T) {
+	src := "servers:\n  - {host: \"my host\", port: 80}\n"
+	doc, err := Decode(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	host := doc.(map[string]any)["servers"].([]any)[0].(map[string]any)["host"]
+	if host != "my host" {
+		t.Fatalf("host=%v", host)
+	}
+}
+
+func TestRFC0002_InlineObjectWithTaggedValues(t *testing.T) {
+	src := "cfg:\n  - {port: !n 8080, mode: !o 755, color: !xb FF00AA}\n"
+	doc, err := Decode(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	item := doc.(map[string]any)["cfg"].([]any)[0].(map[string]any)
+	if item["port"] != int64(8080) {
+		t.Fatalf("port=%v", item["port"])
+	}
+	if item["mode"] != int64(0o755) {
+		t.Fatalf("mode=%v (%T)", item["mode"], item["mode"])
+	}
+	color := item["color"].([]byte)
+	want := []byte{0xff, 0x00, 0xaa}
+	if !reflect.DeepEqual(color, want) {
+		t.Fatalf("color=%v want=%v", color, want)
+	}
+}
+
+func TestRFC0002_InlineObjectWithEmptyValue(t *testing.T) {
+	src := "cfg:\n  - {name: \"\"}\n  - {empty:}\n"
+	doc, err := Decode(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := doc.(map[string]any)["cfg"].([]any)
+	if cfg[0].(map[string]any)["name"] != "" {
+		t.Fatalf("name=%v", cfg[0])
+	}
+	if cfg[1].(map[string]any)["empty"] != "" {
+		t.Fatalf("empty=%v", cfg[1])
+	}
+}
+
+func TestRFC0002_CompactArrayOfInlineObjectsNoTag(t *testing.T) {
+	src := "peers: [{host: a, port: 80}, {host: b, port: 81}]\n"
+	doc, err := Decode(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	peers := doc.(map[string]any)["peers"].([]any)
+	if len(peers) != 2 {
+		t.Fatalf("len=%d", len(peers))
+	}
+	if peers[0].(map[string]any)["host"] != "a" {
+		t.Fatalf("peers[0]=%v", peers[0])
+	}
+	if peers[1].(map[string]any)["host"] != "b" {
+		t.Fatalf("peers[1]=%v", peers[1])
+	}
+}
+
+func TestRFC0002_CompactTaggedArrayOfInlineObjects(t *testing.T) {
+	src := "items: !o[{a: 1, b: 2}, {c: 3}]\n"
+	doc, err := Decode(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	items := doc.(map[string]any)["items"].([]any)
+	if len(items) != 2 {
+		t.Fatalf("len=%d", len(items))
+	}
+	if items[0].(map[string]any)["a"] != "1" || items[0].(map[string]any)["b"] != "2" {
+		t.Fatalf("items[0]=%v", items[0])
+	}
+	if items[1].(map[string]any)["c"] != "3" {
+		t.Fatalf("items[1]=%v", items[1])
+	}
+}
+
+func TestRFC0002_MixBlockAndInlineListItems(t *testing.T) {
+	src := "servers:\n  - {host: a, port: 80}\n  - host: b\n    port: 81\n    tls: enabled\n"
+	doc, err := Decode(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	servers := doc.(map[string]any)["servers"].([]any)
+	if len(servers) != 2 {
+		t.Fatalf("len=%d", len(servers))
+	}
+	if servers[0].(map[string]any)["host"] != "a" {
+		t.Fatalf("servers[0]=%v", servers[0])
+	}
+	if servers[1].(map[string]any)["host"] != "b" || servers[1].(map[string]any)["tls"] != "enabled" {
+		t.Fatalf("servers[1]=%v", servers[1])
+	}
+}
+
+func TestRFC0002_EmptyInlineObject(t *testing.T) {
+	src := "cfg:\n  - {}\n"
+	doc, err := Decode(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := doc.(map[string]any)["cfg"].([]any)[0].(map[string]any)
+	if len(cfg) != 0 {
+		t.Fatalf("expected empty obj, got %v", cfg)
+	}
+}
+
+func TestRFC0002_InlineObjectInNestedBlock(t *testing.T) {
+	src := "data:\n  items:\n    - {id: 1, name: alice}\n    - {id: 2, name: bob}\n"
+	doc, err := Decode(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	items := doc.(map[string]any)["data"].(map[string]any)["items"].([]any)
+	if len(items) != 2 {
+		t.Fatalf("len=%d", len(items))
+	}
+	if items[0].(map[string]any)["id"] != "1" || items[0].(map[string]any)["name"] != "alice" {
+		t.Fatalf("items[0]=%v", items[0])
+	}
+	if items[1].(map[string]any)["id"] != "2" || items[1].(map[string]any)["name"] != "bob" {
+		t.Fatalf("items[1]=%v", items[1])
+	}
+}
+
+func TestRFC0002_DuplicateKeysInInlineObjectThrows(t *testing.T) {
+	src := "cfg:\n  - {a: 1, a: 2}\n"
+	_, err := Decode(src)
+	if err == nil {
+		t.Fatal("expected duplicate key error")
+	}
+	if !strings.Contains(err.Error(), "duplicate key 'a'") {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestRFC0002_MalformedInlineObjectThrows(t *testing.T) {
+	src := "cfg:\n  - {a, b: 2}\n"
+	if _, err := Decode(src); err == nil {
+		t.Fatal("expected malformed inline object error")
+	}
+}
+
+func TestRFC0002_InlineObjectPreservesKeyOrder(t *testing.T) {
+	src := "cfg:\n  - {z: 1, a: 2, m: 3}\n"
+	doc, err := Decode(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	obj := doc.(map[string]any)["cfg"].([]any)[0].(map[string]any)
+	want := map[string]string{"z": "1", "a": "2", "m": "3"}
+	if len(obj) != len(want) {
+		t.Fatalf("len mismatch: got %d want %d", len(obj), len(want))
+	}
+	keys := make([]string, 0, len(obj))
+	for k := range obj {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		if obj[k] != want[k] {
+			t.Fatalf("key %s: got %v want %s", k, obj[k], want[k])
+		}
+	}
+}
+
+func TestRFC0002_NestedCompactArrayInInlineObject(t *testing.T) {
+	src := "cfg:\n  - {tags: !s[a, b, c], port: !n 80}\n"
+	doc, err := Decode(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	item := doc.(map[string]any)["cfg"].([]any)[0].(map[string]any)
+	tags := item["tags"].([]any)
+	if len(tags) != 3 || tags[0] != "a" || tags[1] != "b" || tags[2] != "c" {
+		t.Fatalf("tags=%v", tags)
+	}
+	if item["port"] != int64(80) {
+		t.Fatalf("port=%v", item["port"])
+	}
+}
+
+func TestRFC0002_TraditionalBlockListRegression(t *testing.T) {
+	src := "items:\n  - one\n  - two\n"
+	doc, err := Decode(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	items := doc.(map[string]any)["items"].([]any)
+	if !reflect.DeepEqual(items, []any{"one", "two"}) {
+		t.Fatalf("items=%v", items)
+	}
+}
+
+func TestRFC0002_TraditionalCompactArrayRegression(t *testing.T) {
+	src := "ports: !n[80, 443, 8080]\n"
+	doc, err := Decode(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ports := doc.(map[string]any)["ports"].([]any)
+	if len(ports) != 3 {
+		t.Fatalf("len=%d", len(ports))
+	}
+	if ports[0] != int64(80) || ports[1] != int64(443) || ports[2] != int64(8080) {
+		t.Fatalf("ports=%v", ports)
+	}
+}
+
+func TestRFC0002_EndAsInlineObjectValue(t *testing.T) {
+	// 'end' as a key inside { ... } must not be confused with block-close.
+	src := "cfg:\n  - {end: foo, value: 1}\n"
+	doc, err := Decode(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	item := doc.(map[string]any)["cfg"].([]any)[0].(map[string]any)
+	if item["end"] != "foo" || item["value"] != "1" {
+		t.Fatalf("item=%v", item)
+	}
+}
+
+func TestRFC0002_InlineObjectWithComplexTaggedValues(t *testing.T) {
+	src := "cfg:\n  - {hex: !x FF, bytes: !xb AABB, when: !dt 2024-01-15T10:00:00Z}\n"
+	doc, err := Decode(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	item := doc.(map[string]any)["cfg"].([]any)[0].(map[string]any)
+	if item["hex"] != int64(0xFF) {
+		t.Fatalf("hex=%v (%T)", item["hex"], item["hex"])
+	}
+	bytes, ok := item["bytes"].([]byte)
+	if !ok || !reflect.DeepEqual(bytes, []byte{0xaa, 0xbb}) {
+		t.Fatalf("bytes=%v", item["bytes"])
+	}
+	if item["when"] != (Tagged{Tag: "dt", Value: "2024-01-15T10:00:00Z"}) {
+		t.Fatalf("when=%v", item["when"])
 	}
 }
